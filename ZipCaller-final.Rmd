@@ -1,0 +1,796 @@
+# DCWS Cost-Benefit Optimization Model for Reduced Budget
+# Optimize call allocation to maximize representative sample with minimum cost
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(knitr)
+library(tidyr)
+
+# =============================================================================
+# 1. LOAD AND MERGE ALL DATA
+# =============================================================================
+
+# Load calls data
+calls_data <- read_excel("DataHaven 2024 - Unique Phone Numbers Dialed Per ZIP Code.xlsx", 
+                        sheet = "Summary Table", skip = 2)
+
+calls_clean <- calls_data %>%
+  slice(-1) %>%
+  filter(!is.na(...3) & ...3 != "Total") %>%
+  select(type = ...1, city = ...2, zip_code = ...3, 
+         landline_calls = Mode, cell_calls = ...5, total_calls = ...6) %>%
+  mutate(
+    zip_code = sprintf("%05d", as.numeric(zip_code)),
+    total_calls = as.numeric(total_calls)
+  ) %>%
+  filter(!is.na(total_calls))
+
+# Load responses data  
+responses_data <- read_excel("ZIPFrequencies2024.xlsx", sheet = "Sheet1", skip = 1)
+
+responses_clean <- responses_data %>%
+  filter(!is.na(...2) & ...2 != "Valid") %>%
+  select(zip_code = ...2, responses = Frequency) %>%
+  mutate(
+    zip_code = as.character(zip_code),
+    responses = as.numeric(responses)
+  )
+
+# Load age-specific response data - NEW
+age_responses_data <- read_excel("AgebyZIP2024.xls", sheet = "Sheet1")
+
+age_responses_clean <- age_responses_data %>%
+  # Skip the header rows and filter for actual ZIP code data
+  slice(5:n()) %>%  # Start from row 5 (after headers)
+  filter(!is.na(...2)) %>%  # ZIP code column
+  select(
+    zip_code = ...2,
+    age_18_34 = ...3,      # 18 to 34 
+    age_35_49 = ...4,      # 35 to 49
+    age_50_64 = ...5,      # 50 to 64  
+    age_65_plus = ...6,    # 65 to 69 (treating as 65+)
+    age_refused = ...7,    # Refused
+    age_total = ...8       # Total
+  ) %>%
+  mutate(
+    zip_code = sprintf("%05d", as.numeric(zip_code)),
+    age_18_34 = as.numeric(age_18_34),
+    age_35_49 = as.numeric(age_35_49),
+    age_50_64 = as.numeric(age_50_64),
+    age_65_plus = as.numeric(age_65_plus),
+    age_refused = as.numeric(age_refused),
+    age_total = as.numeric(age_total),
+    # Combine 35-49 and 50-64 for 35-64 category
+    age_35_64 = age_35_49 + age_50_64
+  ) %>%
+  filter(!is.na(zip_code) & !is.na(age_total))
+
+# Load race-specific response data - NEW  
+race_responses_data <- read_excel("RacebyZIP2024.xls", sheet = "Sheet1")
+
+race_responses_clean <- race_responses_data %>%
+  # Skip the header rows and filter for actual ZIP code data
+  slice(5:n()) %>%  # Start from row 5 (after headers)
+  filter(!is.na(...2)) %>%  # ZIP code column
+  select(
+    zip_code = ...2,
+    race_white = ...3,        # Caucasian/White
+    race_black = ...4,        # African American/Black  
+    race_hispanic = ...5,     # Hispanic/Latino
+    race_asian = ...6,        # Asian
+    race_native = ...7,       # American Indian or Alaska Native
+    race_pacific = ...8,      # Native Hawaiian or other Pacific Islander
+    race_other = ...9,        # Other/Something else
+    race_refused = ...10,     # Refused
+    race_total = ...11        # Total
+  ) %>%
+  mutate(
+    zip_code = sprintf("%05d", as.numeric(zip_code)),
+    across(race_white:race_total, as.numeric)
+  ) %>%
+  filter(!is.na(zip_code) & !is.na(race_total))
+
+# Load demographic data
+demo_data <- read_csv("ACSDP5Y2023.DP05-Data.csv", skip = 1)
+
+demo_clean <- demo_data %>%
+  filter(str_detect(.[[2]], "ZCTA5")) %>%
+  mutate(
+    zip_code = str_extract(.[[2]], "\\d{5}"),
+    total_population = as.numeric(.[[3]]),
+    male_population = as.numeric(.[[5]]),
+    under_18 = as.numeric(.[[39]]),
+    age_65_plus = as.numeric(.[[59]]),
+    white_alone = as.numeric(.[[75]]),
+    black_alone = as.numeric(.[[77]]),
+    asian_alone = as.numeric(.[[89]]),
+    hispanic_latino = as.numeric(.[[153]])  # Updated to correct position for DP05_0076E
+  ) %>%
+  filter(!is.na(zip_code) & !is.na(total_population) & total_population > 0) %>%
+  mutate(
+    pct_male = male_population / total_population * 100,
+    pct_under_18 = ifelse(!is.na(under_18), under_18 / total_population * 100, NA),
+    pct_65_plus = ifelse(!is.na(age_65_plus), age_65_plus / total_population * 100, NA),
+    pct_white = ifelse(!is.na(white_alone), white_alone / total_population * 100, NA),
+    pct_black = ifelse(!is.na(black_alone), black_alone / total_population * 100, NA),
+    pct_hispanic = ifelse(!is.na(hispanic_latino), hispanic_latino / total_population * 100, NA)
+  ) %>%
+  select(zip_code, total_population, pct_male, pct_under_18, pct_65_plus, 
+         pct_white, pct_black, pct_hispanic)
+
+# Load poverty data
+poverty_data <- read_csv("ACSST5Y2023.S1701-Data.csv", skip = 1)
+
+poverty_clean <- poverty_data %>%
+  filter(str_detect(.[[2]], "ZCTA5")) %>%
+  mutate(
+    zip_code = str_extract(.[[2]], "\\d{5}"),
+    poverty_rate = as.numeric(.[[187]])
+  ) %>%
+  filter(!is.na(zip_code) & !is.na(poverty_rate)) %>%
+  select(zip_code, poverty_rate)
+
+# Load homeownership data
+housing_data <- read_csv("ACSDP5Y2023.DP04-Data.csv", skip = 1)
+
+housing_clean <- housing_data %>%
+  filter(str_detect(.[[2]], "ZCTA5")) %>%
+  mutate(
+    zip_code = str_extract(.[[2]], "\\d{5}"),
+    total_occupied = as.numeric(.[[3]]),    # DP04_0001E - Total occupied housing units
+    owner_occupied = as.numeric(.[[5]]),    # DP04_0002E - Owner occupied housing units  
+    homeownership_rate = ifelse(!is.na(total_occupied) & total_occupied > 0, 
+                               (owner_occupied / total_occupied) * 100, NA)
+  ) %>%
+  filter(!is.na(zip_code) & !is.na(homeownership_rate)) %>%
+  select(zip_code, homeownership_rate)
+
+# Merge all data
+model_data <- calls_clean %>%
+  left_join(responses_clean, by = "zip_code") %>%
+  left_join(age_responses_clean, by = "zip_code") %>%
+  left_join(race_responses_clean, by = "zip_code") %>%
+  left_join(demo_clean, by = "zip_code") %>%
+  left_join(poverty_clean, by = "zip_code") %>%
+  left_join(housing_clean, by = "zip_code") %>%
+  mutate(
+    responses = ifelse(is.na(responses), 0, responses),
+    # Handle missing demographic response data
+    across(c(age_18_34:age_total, race_white:race_total), ~ifelse(is.na(.), 0, .))
+  ) %>%
+  filter(!is.na(total_population) & total_population >= 1000)  # Filter out small ZIP codes
+
+# =============================================================================
+# 2. CALCULATE EFFICIENCY AND DEMOGRAPHIC-WEIGHTED RESPONSE VALUES
+# =============================================================================
+
+# Response value weights
+AGE_18_34_VALUE <- 200
+AGE_35_64_VALUE <- 100
+AGE_65_PLUS_VALUE <- 50
+RACE_BLACK_VALUE <- 125
+RACE_HISPANIC_VALUE <- 150
+RACE_OTHER_VALUE <- 100
+
+model_data <- model_data %>%
+  mutate(
+    # Basic efficiency metrics
+    response_rate = ifelse(total_calls > 0, responses / total_calls, 0),
+    calls_per_response = ifelse(responses > 0, total_calls / responses, Inf),
+    calls_per_1000_pop = (total_calls / total_population) * 1000,
+    responses_per_1000_pop = (responses / total_population) * 1000,
+    
+# Calculate demographic-weighted response values
+# Age-weighted value
+    age_weighted_value = ifelse(age_total > 0,
+      (age_18_34 * AGE_18_34_VALUE + 
+       age_35_64 * AGE_35_64_VALUE + 
+       age_65_plus * AGE_65_PLUS_VALUE) / age_total,
+      AGE_35_64_VALUE), # Default to middle value if no age data
+    
+# Race-weighted value  
+    race_weighted_value = ifelse(race_total > 0,
+      (race_black * RACE_BLACK_VALUE + 
+       race_hispanic * RACE_HISPANIC_VALUE + 
+       (race_white + race_asian + race_native + race_pacific + race_other) * RACE_OTHER_VALUE) / race_total,
+      RACE_OTHER_VALUE), # Default to base value if no race data
+    
+# Combined response value (average of age and race weighting)
+    demographic_weighted_response_value = (age_weighted_value + race_weighted_value) / 2,
+    
+# Total value of responses from this ZIP code
+    total_response_value = responses * demographic_weighted_response_value,
+    
+# Calculate diversity metrics (keep for comparison/analysis)
+    state_pct_white = weighted.mean(pct_white, total_population, na.rm = TRUE),
+    state_poverty_rate = weighted.mean(poverty_rate, total_population, na.rm = TRUE),
+    state_homeownership = weighted.mean(homeownership_rate, total_population, na.rm = TRUE),
+    state_pct_65_plus = weighted.mean(pct_65_plus, total_population, na.rm = TRUE),
+      racial_diversity = abs(pct_white - state_pct_white),
+    economic_diversity = pmax(0, poverty_rate - state_poverty_rate),
+    housing_diversity = abs(homeownership_rate - state_homeownership),
+    age_diversity = abs(pct_65_plus - state_pct_65_plus),
+      diversity_score = (racial_diversity + economic_diversity + housing_diversity + age_diversity) / 4,
+    diversity_quartile = ntile(diversity_score, 4),
+    
+# Current sampling intensity relative to population
+    sampling_intensity = calls_per_1000_pop / weighted.mean(calls_per_1000_pop, total_population),
+    
+# Population weight (for representativeness)
+    population_weight = total_population / sum(total_population, na.rm = TRUE)
+  )
+
+# =============================================================================
+# 3. DEMOGRAPHIC-WEIGHTED COST-BENEFIT MODEL
+# =============================================================================
+
+# Model parameters
+CALL_COST <- 5      
+# $5 per call
+
+model_data <- model_data %>%
+  mutate(
+# Cost-benefit metrics using demographic-weighted values
+    historical_cost_per_call = CALL_COST,
+    historical_cost_per_response = ifelse(responses > 0, total_calls * CALL_COST / responses, Inf),
+    historical_benefit_per_response = demographic_weighted_response_value,
+    historical_net_benefit = total_response_value - total_calls * CALL_COST,
+    historical_roi = ifelse(total_calls > 0, historical_net_benefit / (total_calls * CALL_COST), 0),
+    
+# Predicted efficiency for future (use historical response rate)
+    predicted_response_rate = pmax(response_rate, 0.01), # Minimum 1% to avoid division by zero
+    predicted_calls_per_response = 1 / predicted_response_rate,
+    predicted_cost_per_response = predicted_calls_per_response * CALL_COST,
+    
+# Future value metrics using demographic weighting
+    predicted_roi = (demographic_weighted_response_value - predicted_cost_per_response) / predicted_cost_per_response,
+    value_score = demographic_weighted_response_value / predicted_cost_per_response,
+    
+# Optimization score prioritizing demographic value and efficiency
+    optimization_score = (predicted_roi * demographic_weighted_response_value * population_weight * 100),
+    
+# Efficiency categories
+    efficiency_category = case_when(
+      predicted_calls_per_response <= 50 ~ "High Efficiency",
+      predicted_calls_per_response <= 100 ~ "Medium Efficiency", 
+      predicted_calls_per_response <= 200 ~ "Low Efficiency",
+      TRUE ~ "Very Low Efficiency"
+    ),
+    
+# Sampling recommendation based on cost-benefit
+    current_vs_optimal = case_when(
+      sampling_intensity > 1.5 & predicted_roi < 0.5 ~ "Reduce Calls",
+      sampling_intensity > 1.2 & predicted_roi < 1.0 ~ "Reduce Calls",
+      sampling_intensity < 0.5 & predicted_roi > 1.0 & demographic_weighted_response_value > 120 ~ "Increase Calls",
+      sampling_intensity < 0.8 & predicted_roi > 2.0 ~ "Increase Calls",
+      TRUE ~ "Maintain"
+    ),
+    
+# Demographic composition metrics for analysis
+    pct_responses_young = ifelse(age_total > 0, age_18_34 / age_total * 100, NA),
+    pct_responses_middle = ifelse(age_total > 0, age_35_64 / age_total * 100, NA),
+    pct_responses_older = ifelse(age_total > 0, age_65_plus / age_total * 100, NA),
+    pct_responses_black = ifelse(race_total > 0, race_black / race_total * 100, NA),
+    pct_responses_hispanic = ifelse(race_total > 0, race_hispanic / race_total * 100, NA),
+    pct_responses_white = ifelse(race_total > 0, race_white / race_total * 100, NA)
+  )
+
+# =============================================================================
+# 4. OPTIMIZATION RECOMMENDATIONS
+# =============================================================================
+
+cat("=== DCWS DEMOGRAPHIC-WEIGHTED COST-BENEFIT OPTIMIZATION ===\n\n")
+
+# Summary statistics
+cat("MODEL PARAMETERS:\n")
+cat("Call cost: $", CALL_COST, "\n")
+cat("Age weighting: 18-34 = $", AGE_18_34_VALUE, ", 35-64 = $", AGE_35_64_VALUE, ", 65+ = $", AGE_65_PLUS_VALUE, "\n")
+cat("Race weighting: Black = $", RACE_BLACK_VALUE, ", Hispanic = $", RACE_HISPANIC_VALUE, ", Other = $", RACE_OTHER_VALUE, "\n")
+cat("ZIP codes analyzed:", nrow(model_data), "\n\n")
+
+# Demographic composition of responses
+demographic_summary <- model_data %>%
+  filter(responses > 0) %>%
+  summarise(
+    total_responses = sum(responses),
+    total_age_responses = sum(age_total),
+    total_race_responses = sum(race_total),
+    pct_young_overall = sum(age_18_34, na.rm = TRUE) / sum(age_total, na.rm = TRUE) * 100,
+    pct_middle_overall = sum(age_35_64, na.rm = TRUE) / sum(age_total, na.rm = TRUE) * 100,
+    pct_older_overall = sum(age_65_plus, na.rm = TRUE) / sum(age_total, na.rm = TRUE) * 100,
+    pct_white_overall = sum(race_white, na.rm = TRUE) / sum(race_total, na.rm = TRUE) * 100,
+    pct_black_overall = sum(race_black, na.rm = TRUE) / sum(race_total, na.rm = TRUE) * 100,
+    pct_hispanic_overall = sum(race_hispanic, na.rm = TRUE) / sum(race_total, na.rm = TRUE) * 100,
+    avg_age_weighted_value = weighted.mean(age_weighted_value, age_total, na.rm = TRUE),
+    avg_race_weighted_value = weighted.mean(race_weighted_value, race_total, na.rm = TRUE),
+    avg_combined_value = weighted.mean(demographic_weighted_response_value, responses, na.rm = TRUE)
+  )
+
+cat("2024 RESPONSE DEMOGRAPHICS:\n")
+cat("Total responses with age data:", format(demographic_summary$total_age_responses, big.mark = ","), "\n")
+cat("Total responses with race data:", format(demographic_summary$total_race_responses, big.mark = ","), "\n")
+cat("Age distribution: 18-34 (", round(demographic_summary$pct_young_overall, 1), "%), 35-64 (", round(demographic_summary$pct_middle_overall, 1), "%), 65+ (", round(demographic_summary$pct_older_overall, 1), "%)\n")
+cat("Race distribution: White (", round(demographic_summary$pct_white_overall, 1), "%), Black (", round(demographic_summary$pct_black_overall, 1), "%), Hispanic (", round(demographic_summary$pct_hispanic_overall, 1), "%)\n")
+cat("Average response value: $", round(demographic_summary$avg_combined_value, 0), "\n\n")
+
+# State-level metrics with demographic weighting
+state_metrics <- model_data %>%
+  summarise(
+    total_population = sum(total_population),
+    total_calls_2024 = sum(total_calls),
+    total_responses_2024 = sum(responses),
+    overall_response_rate = total_responses_2024 / total_calls_2024,
+    total_cost_2024 = total_calls_2024 * CALL_COST,
+    total_demographic_value_2024 = sum(total_response_value, na.rm = TRUE),
+    net_benefit_2024 = total_demographic_value_2024 - total_cost_2024,
+    overall_roi = net_benefit_2024 / total_cost_2024
+  )
+
+cat("2024 PERFORMANCE WITH DEMOGRAPHIC WEIGHTING:\n")
+cat("Total calls:", format(state_metrics$total_calls_2024, big.mark = ","), "\n")
+cat("Total responses:", format(state_metrics$total_responses_2024, big.mark = ","), "\n")
+cat("Overall response rate:", round(state_metrics$overall_response_rate * 100, 2), "%\n")
+cat("Total cost: $", format(state_metrics$total_cost_2024, big.mark = ","), "\n")
+cat("Total demographic-weighted value: $", format(state_metrics$total_demographic_value_2024, big.mark = ","), "\n")
+cat("Net benefit: $", format(state_metrics$net_benefit_2024, big.mark = ","), "\n")
+cat("Overall ROI:", round(state_metrics$overall_roi * 100, 1), "%\n\n")
+
+# Top optimization targets with demographic details
+cat("TOP 15 ZIP CODES FOR DEMOGRAPHIC-WEIGHTED OPTIMIZATION:\n")
+top_targets <- model_data %>%
+  filter(responses > 0) %>%  # Only ZIPs with proven response capability
+  arrange(desc(optimization_score)) %>%
+  head(15) %>%
+  select(zip_code, city, total_population, responses, demographic_weighted_response_value,
+         predicted_response_rate, predicted_roi, pct_responses_young, pct_responses_black, pct_responses_hispanic) %>%
+  mutate(
+    predicted_response_rate = round(predicted_response_rate * 100, 1),
+    predicted_roi = round(predicted_roi * 100, 1),
+    demographic_weighted_response_value = round(demographic_weighted_response_value, 0),
+    pct_responses_young = round(pct_responses_young, 1),
+    pct_responses_black = round(pct_responses_black, 1),
+    pct_responses_hispanic = round(pct_responses_hispanic, 1)
+  )
+
+print(kable(top_targets, 
+            col.names = c("ZIP", "City", "Population", "Responses", "Avg Value", 
+                         "Response Rate %", "ROI %", "% Young", "% Black", "% Hispanic")))
+
+# High-value demographic areas
+cat("\nZIP CODES WITH HIGHEST DEMOGRAPHIC VALUE (>$130 per response):\n")
+high_value_demographics <- model_data %>%
+  filter(responses > 0 & demographic_weighted_response_value > 130) %>%
+  arrange(desc(demographic_weighted_response_value)) %>%
+  head(10) %>%
+  select(zip_code, city, responses, demographic_weighted_response_value, 
+         pct_responses_young, pct_responses_black, pct_responses_hispanic, predicted_roi) %>%
+  mutate(
+    demographic_weighted_response_value = round(demographic_weighted_response_value, 0),
+    pct_responses_young = round(pct_responses_young, 1),
+    pct_responses_black = round(pct_responses_black, 1),
+    pct_responses_hispanic = round(pct_responses_hispanic, 1),
+    predicted_roi = round(predicted_roi * 100, 1)
+  )
+
+print(kable(high_value_demographics,
+            col.names = c("ZIP", "City", "Responses", "Avg Value", "% Young", "% Black", "% Hispanic", "ROI %")))
+
+# Underutilized high-value areas
+cat("\nUNDERUTILIZED HIGH-VALUE AREAS (low call intensity, high potential):\n")
+underutilized <- model_data %>%
+  filter(sampling_intensity < 0.8 & predicted_roi > 1.0 & demographic_weighted_response_value > 120) %>%
+  arrange(desc(predicted_roi)) %>%
+  head(10) %>%
+  select(zip_code, city, total_population, demographic_weighted_response_value, calls_per_1000_pop, 
+         predicted_roi, current_vs_optimal) %>%
+  mutate(
+    calls_per_1000_pop = round(calls_per_1000_pop, 1),
+    predicted_roi = round(predicted_roi * 100, 1),
+    demographic_weighted_response_value = round(demographic_weighted_response_value, 0)
+  )
+
+print(kable(underutilized,
+            col.names = c("ZIP", "City", "Population", "Response Value", "Calls/1000", 
+                         "ROI %", "Recommendation")))
+
+# Oversampled low-efficiency areas
+cat("\nOVERSAMPLED LOW-EFFICIENCY AREAS (reduce calls here):\n")
+oversampled <- model_data %>%
+  filter(sampling_intensity > 1.2 & predicted_roi < 1.0) %>%
+  arrange(sampling_intensity) %>%
+  head(10) %>%
+  select(zip_code, city, total_population, calls_per_1000_pop, predicted_calls_per_response, 
+         predicted_roi, current_vs_optimal) %>%
+  mutate(
+    calls_per_1000_pop = round(calls_per_1000_pop, 1),
+    predicted_calls_per_response = round(predicted_calls_per_response, 0),
+    predicted_roi = round(predicted_roi * 100, 1)
+  )
+
+print(kable(oversampled,
+            col.names = c("ZIP", "City", "Population", "Calls/1000", "Calls/Response", 
+                         "ROI %", "Recommendation")))
+
+# =============================================================================
+# 5. BUDGET OPTIMIZATION SCENARIOS
+# =============================================================================
+
+cat("\n=== BUDGET OPTIMIZATION SCENARIOS ===\n\n")
+
+# Current budget
+current_budget <- state_metrics$total_cost_2024
+
+# Scenario: 50% budget cut
+reduced_budget <- current_budget * 0.5
+optimal_allocation_50 <- model_data %>%
+  filter(predicted_roi > 0) %>%
+  arrange(desc(optimization_score)) %>%
+  mutate(
+    estimated_calls_needed = predicted_calls_per_response,
+    cumulative_cost = cumsum(estimated_calls_needed * CALL_COST),
+    within_budget = cumulative_cost <= reduced_budget
+  ) %>%
+  filter(within_budget)
+
+cat("SCENARIO: 50% BUDGET REDUCTION\n")
+cat("Reduced budget: $", format(reduced_budget, big.mark = ","), "\n")
+cat("Recommended ZIP codes to target:", nrow(optimal_allocation_50), "\n")
+cat("Estimated responses:", round(sum(1/optimal_allocation_50$predicted_calls_per_response[is.finite(optimal_allocation_50$predicted_calls_per_response)])), "\n")
+cat("Estimated total value: $", format(sum(optimal_allocation_50$demographic_weighted_response_value, na.rm = TRUE), big.mark = ","), "\n\n")
+
+# Efficiency by category
+efficiency_summary <- model_data %>%
+  group_by(efficiency_category) %>%
+  summarise(
+    zip_count = n(),
+    avg_cost_per_response = mean(predicted_cost_per_response[is.finite(predicted_cost_per_response)]),
+    avg_response_value = mean(demographic_weighted_response_value, na.rm = TRUE),
+    avg_roi = mean(predicted_roi[is.finite(predicted_roi)]),
+    population_covered = sum(total_population),
+    .groups = 'drop'
+  ) %>%
+  arrange(avg_cost_per_response)
+
+cat("EFFICIENCY ANALYSIS BY CATEGORY:\n")
+print(kable(efficiency_summary %>%
+            mutate(
+              avg_cost_per_response = round(avg_cost_per_response, 0),
+              avg_response_value = round(avg_response_value, 0),
+              avg_roi = round(avg_roi * 100, 1),
+              population_covered = format(population_covered, big.mark = ",")
+            ),
+            col.names = c("Efficiency Category", "ZIP Count", "Avg Cost/Response", 
+                         "Avg Response Value", "Avg ROI %", "Population")))
+
+# =============================================================================
+# 6. VISUALIZATIONS - ZIP CODES OF MOST INTEREST
+# =============================================================================
+
+# ROI vs Diversity scatter plot with ZIP code labels for top performers
+roi_diversity_plot <- model_data %>% 
+  filter(is.finite(predicted_roi) & predicted_roi < 5) %>%
+  mutate(
+    top_performer = optimization_score >= quantile(optimization_score, 0.90, na.rm = TRUE),
+    point_color = case_when(
+      current_vs_optimal == "Increase Calls" ~ "Increase Calls",
+      current_vs_optimal == "Reduce Calls" ~ "Reduce Calls", 
+      TRUE ~ "Maintain"
+    )
+  ) %>%
+  ggplot(aes(x = demographic_weighted_response_value, y = predicted_roi, size = total_population, color = point_color)) +
+  geom_point(alpha = 0.7) +
+  geom_text(data = . %>% filter(top_performer), 
+            aes(label = zip_code), size = 3, hjust = -0.1, vjust = 0.5, color = "black") +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", alpha = 0.7) +
+  scale_color_manual(values = c("Increase Calls" = "green", "Reduce Calls" = "red", "Maintain" = "blue")) +
+  labs(
+    title = "ROI vs Demographic Response Value: ZIP Codes of Interest",
+    subtitle = "Top 10% performers labeled, dashed line = break-even",
+    x = "Demographic-Weighted Response Value ($)",
+    y = "Predicted ROI",
+    size = "Population",
+    color = "Recommendation"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Optimization score ranking plot
+optimization_ranking_plot <- model_data %>%
+  arrange(desc(optimization_score)) %>%
+  mutate(
+    rank = row_number(),
+    top_tier = rank <= 20,
+    label_zip = ifelse(rank <= 15, zip_code, "")
+  ) %>%
+  filter(rank <= 50) %>%  # Show top 50
+  ggplot(aes(x = rank, y = optimization_score, fill = diversity_quartile)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = label_zip), angle = 90, hjust = -0.1, size = 3) +
+  scale_fill_gradient(low = "lightblue", high = "darkblue", name = "Diversity\nQuartile") +
+  labs(
+    title = "Top 50 ZIP Codes by Optimization Score",
+    subtitle = "Top 15 ZIP codes labeled",
+    x = "Rank (1 = Highest Priority)",
+    y = "Optimization Score"
+  ) +
+  theme_minimal()
+
+# Efficiency vs Current Sampling scatter
+efficiency_sampling_plot <- model_data %>%
+  filter(is.finite(predicted_calls_per_response) & predicted_calls_per_response < 500) %>%
+  mutate(
+    interesting = case_when(
+      sampling_intensity > 1.5 & predicted_calls_per_response > 100 ~ "Oversampled & Inefficient",
+      sampling_intensity < 0.5 & predicted_calls_per_response < 50 ~ "Undersampled & Efficient", 
+      diversity_quartile == 4 & predicted_calls_per_response < 100 ~ "High Diversity & Efficient",
+      TRUE ~ "Standard"
+    ),
+    top_interesting = interesting != "Standard"
+  ) %>%
+  ggplot(aes(x = sampling_intensity, y = predicted_calls_per_response, color = interesting, size = total_population)) +
+  geom_point(alpha = 0.7) +
+  geom_text(data = . %>% filter(top_interesting), 
+            aes(label = zip_code), size = 2.5, hjust = -0.1, vjust = 0.5) +
+  geom_vline(xintercept = 1, linetype = "dashed", alpha = 0.5) +
+  geom_hline(yintercept = 100, linetype = "dashed", alpha = 0.5) +
+  scale_color_manual(values = c(
+    "Oversampled & Inefficient" = "red",
+    "Undersampled & Efficient" = "green", 
+    "High Diversity & Efficient" = "purple",
+    "Standard" = "gray"
+  )) +
+  labs(
+    title = "Current Sampling vs Efficiency",
+    subtitle = "Interesting ZIP codes labeled",
+    x = "Current Sampling Intensity (1 = Average)",
+    y = "Predicted Calls per Response",
+    color = "Category",
+    size = "Population"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Demographic response composition heatmap for top ZIP codes
+top_zips_for_heatmap <- model_data %>%
+  filter(responses > 0) %>%
+  arrange(desc(optimization_score)) %>%
+  head(20) %>%
+  select(zip_code, city, pct_responses_young, pct_responses_middle, pct_responses_older,
+         pct_responses_black, pct_responses_hispanic, pct_responses_white,
+         demographic_weighted_response_value, optimization_score) %>%
+  mutate(
+    across(c(pct_responses_young:pct_responses_white), ~round(., 1)),
+    demographic_weighted_response_value = round(demographic_weighted_response_value, 0),
+    optimization_score = round(optimization_score, 1)
+  ) %>%
+  pivot_longer(cols = c(pct_responses_young, pct_responses_middle, pct_responses_older,
+                       pct_responses_black, pct_responses_hispanic, pct_responses_white),
+               names_to = "demographic_type", values_to = "percentage") %>%
+  mutate(
+    demographic_type = case_when(
+      demographic_type == "pct_responses_young" ~ "Young (18-34)",
+      demographic_type == "pct_responses_middle" ~ "Middle (35-64)", 
+      demographic_type == "pct_responses_older" ~ "Older (65+)",
+      demographic_type == "pct_responses_black" ~ "Black",
+      demographic_type == "pct_responses_hispanic" ~ "Hispanic",
+      demographic_type == "pct_responses_white" ~ "White"
+    ),
+    zip_label = paste0(zip_code, " ($", demographic_weighted_response_value, ")")
+  ) %>%
+  filter(!is.na(percentage))
+
+demographic_response_heatmap <- ggplot(top_zips_for_heatmap, 
+                                     aes(x = demographic_type, y = reorder(zip_label, optimization_score), fill = percentage)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "white", mid = "yellow", high = "red", midpoint = 50, name = "% of\nResponses") +
+  labs(
+    title = "Actual Response Demographics: Top 20 ZIP Codes",
+    subtitle = "Ordered by optimization score, values show response composition (not ZIP demographics)",
+    x = "Respondent Demographics",
+    y = "ZIP Code (Average Response Value)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8), 
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Geographic pattern plot (using ZIP code as proxy for location)
+geographic_pattern <- model_data %>%
+  mutate(
+    zip_numeric = as.numeric(zip_code),
+    recommendation_color = case_when(
+      current_vs_optimal == "Increase Calls" ~ "Increase",
+      current_vs_optimal == "Reduce Calls" ~ "Reduce",
+      TRUE ~ "Maintain"
+    )
+  ) %>%
+  ggplot(aes(x = zip_numeric, y = optimization_score, color = recommendation_color, size = total_population)) +
+  geom_point(alpha = 0.7) +
+  scale_color_manual(values = c("Increase" = "green", "Reduce" = "red", "Maintain" = "blue")) +
+  labs(
+    title = "Optimization Score by ZIP Code (Geographic Pattern)",
+    subtitle = "Lower ZIP codes = more southwestern CT",
+    x = "ZIP Code (Geographic Proxy)",
+    y = "Optimization Score", 
+    color = "Recommendation",
+    size = "Population"
+  ) +
+  theme_minimal()
+
+print(roi_diversity_plot)
+print(optimization_ranking_plot)
+print(efficiency_sampling_plot)
+print(demographic_response_heatmap)
+print(geographic_pattern)
+
+# =============================================================================
+# 7. EXPORT RESULTS
+# =============================================================================
+
+write.csv(model_data, "demographic_weighted_optimization_results.csv", row.names = FALSE)
+write.csv(top_targets, "top_demographic_optimization_targets.csv", row.names = FALSE)
+write.csv(underutilized, "underutilized_high_demographic_value_areas.csv", row.names = FALSE)
+write.csv(oversampled, "oversampled_low_efficiency_areas.csv", row.names = FALSE)
+
+cat("\nFiles created:\n")
+cat("- demographic_weighted_optimization_results.csv (complete model results)\n")
+cat("- top_demographic_optimization_targets.csv (priority ZIP codes)\n")
+cat("- underutilized_high_demographic_value_areas.csv (expand calling here)\n")
+cat("- oversampled_low_efficiency_areas.csv (reduce calling here)\n")
+
+cat("\n=== OPTIMIZATION SUMMARY ===\n")
+cat("STRATEGY FOR BUDGET CUTS:\n")
+cat("1. Focus on high-diversity, high-efficiency ZIP codes\n")
+cat("2. Reduce calls to oversampled, low-ROI areas\n")
+cat("3. Increase targeting of underutilized diverse communities\n")
+cat("4. Prioritize ZIP codes with ROI > 100% and diversity quartile 3-4\n")
+cat("5. Use optimization_score to rank all ZIP codes for budget allocation\n")
+
+# =============================================================================
+# 8. COMPREHENSIVE ZIP CODE SUMMARY TABLE
+# =============================================================================
+
+cat("\n=== COMPREHENSIVE ZIP CODE ANALYSIS ===\n\n")
+
+# Create a clean, comprehensive summary table
+zip_analysis_summary <- model_data %>%
+  select(
+# Basic identifiers
+    zip_code, city, type,
+    
+# Population and demographics
+    total_population,
+    pct_white, pct_black, pct_hispanic,
+    poverty_rate, homeownership_rate, pct_65_plus,
+    
+# Response demographics (actual respondent characteristics)
+    responses, age_total, race_total,
+    pct_responses_young, pct_responses_middle, pct_responses_older,
+    pct_responses_white, pct_responses_black, pct_responses_hispanic,
+    
+# Demographic-weighted values
+    age_weighted_value, race_weighted_value, demographic_weighted_response_value,
+    
+# Historical performance (2024)
+    total_calls, response_rate,
+    calls_per_1000_pop, responses_per_1000_pop,
+    
+# Cost-benefit analysis
+    predicted_cost_per_response, predicted_roi,
+    optimization_score, efficiency_category,
+    
+# Strategic recommendations
+    sampling_intensity, current_vs_optimal,
+    
+# Diversity metrics (for comparison)
+    diversity_score, diversity_quartile,
+    
+# Additional useful metrics
+    calls_per_response, population_weight
+  ) %>%
+  mutate(
+    # Round numerical values for readability
+    total_population = as.integer(total_population),
+    pct_white = round(pct_white, 1),
+    pct_black = round(pct_black, 1), 
+    pct_hispanic = round(pct_hispanic, 1),
+    poverty_rate = round(poverty_rate, 1),
+    homeownership_rate = round(homeownership_rate, 1),
+    pct_65_plus = round(pct_65_plus, 1),
+    pct_responses_young = round(pct_responses_young, 1),
+    pct_responses_middle = round(pct_responses_middle, 1),
+    pct_responses_older = round(pct_responses_older, 1),
+    pct_responses_white = round(pct_responses_white, 1),
+    pct_responses_black = round(pct_responses_black, 1),
+    pct_responses_hispanic = round(pct_responses_hispanic, 1),
+    age_weighted_value = round(age_weighted_value, 0),
+    race_weighted_value = round(race_weighted_value, 0),
+    demographic_weighted_response_value = round(demographic_weighted_response_value, 0),
+    diversity_score = round(diversity_score, 2),
+    response_rate = round(response_rate * 100, 1),
+    calls_per_1000_pop = round(calls_per_1000_pop, 1),
+    responses_per_1000_pop = round(responses_per_1000_pop, 1),
+    predicted_cost_per_response = round(predicted_cost_per_response, 0),
+    predicted_roi = round(predicted_roi * 100, 1),
+    optimization_score = round(optimization_score, 1),
+    sampling_intensity = round(sampling_intensity, 2),
+    calls_per_response = ifelse(is.finite(calls_per_response), round(calls_per_response, 0), NA),
+    population_weight = round(population_weight * 100, 3)
+  ) %>%
+  arrange(desc(optimization_score))
+
+# Display summary statistics
+cat("SUMMARY TABLE CREATED:\n")
+cat("Total ZIP codes:", nrow(zip_analysis_summary), "\n")
+cat("ZIP codes with responses:", sum(zip_analysis_summary$responses > 0, na.rm = TRUE), "\n")
+cat("Average diversity score:", round(mean(zip_analysis_summary$diversity_score, na.rm = TRUE), 2), "\n")
+cat("Average optimization score:", round(mean(zip_analysis_summary$optimization_score, na.rm = TRUE), 1), "\n\n")
+
+# Show top 10 by optimization score
+cat("TOP 10 ZIP CODES BY OPTIMIZATION SCORE:\n")
+print(kable(head(zip_analysis_summary, 10) %>%
+            select(zip_code, city, total_population, diversity_quartile, 
+                   optimization_score, predicted_roi, current_vs_optimal),
+            col.names = c("ZIP", "City", "Population", "Diversity Q", 
+                         "Opt Score", "ROI %", "Recommendation")))
+
+cat("\n")
+
+# Show the data frame structure
+cat("COMPLETE DATA FRAME STRUCTURE:\n")
+str(zip_analysis_summary)
+
+cat("\n=== HOW TO USE THE DATA FRAME ===\n")
+cat("The 'zip_analysis_summary' data frame contains all ZIP codes with key metrics.\n")
+cat("Use these commands to explore:\n\n")
+
+cat("# View all data\n")
+cat("View(zip_analysis_summary)\n\n")
+
+cat("# Top ZIP codes by optimization score\n") 
+cat("head(zip_analysis_summary, 20)\n\n")
+
+cat("# High-diversity, high-ROI ZIP codes\n")
+cat("zip_analysis_summary %>% filter(diversity_quartile >= 3 & predicted_roi > 100)\n\n")
+
+cat("# ZIP codes to reduce calling (oversampled, low efficiency)\n")
+cat("zip_analysis_summary %>% filter(current_vs_optimal == 'Reduce Calls')\n\n")
+
+cat("# ZIP codes to increase calling (underutilized)\n")
+cat("zip_analysis_summary %>% filter(current_vs_optimal == 'Increase Calls')\n\n")
+
+cat("# Sort by any column (example: by diversity score)\n")
+cat("zip_analysis_summary %>% arrange(desc(diversity_score))\n\n")
+
+cat("# Filter by specific criteria (example: large population, high diversity)\n")
+cat("zip_analysis_summary %>% filter(total_population > 20000 & diversity_quartile == 4)\n\n")
+
+cat("# Summary by recommendation category\n")
+cat("zip_analysis_summary %>% group_by(current_vs_optimal) %>% \n")
+cat("  summarise(count = n(), avg_opt_score = mean(optimization_score), \n")
+cat("            total_pop = sum(total_population))\n\n")
+
+# Create some useful filtered views
+high_priority <- zip_analysis_summary %>%
+  filter(optimization_score > quantile(optimization_score, 0.75, na.rm = TRUE))
+
+diverse_efficient <- zip_analysis_summary %>%
+  filter(diversity_quartile >= 3 & predicted_roi > 50 & !is.na(predicted_roi))
+
+reduce_calling <- zip_analysis_summary %>%
+  filter(current_vs_optimal == "Reduce Calls")
+
+increase_calling <- zip_analysis_summary %>%
+  filter(current_vs_optimal == "Increase Calls")
+
+cat("PRE-FILTERED DATA FRAMES CREATED:\n")
+cat("- high_priority: Top 25% by optimization score (", nrow(high_priority), " ZIP codes)\n")
+cat("- diverse_efficient: High diversity + good ROI (", nrow(diverse_efficient), " ZIP codes)\n") 
+cat("- reduce_calling: Oversampled areas (", nrow(reduce_calling), " ZIP codes)\n")
+cat("- increase_calling: Underutilized areas (", nrow(increase_calling), " ZIP codes)\n\n")
+
+cat("=== EXPORT COMPLETE SUMMARY ===\n")
+write.csv(zip_analysis_summary, "complete_zip_analysis_summary.csv", row.names = FALSE)
+cat("Complete summary exported to: complete_zip_analysis_summary.csv\n")
+cat("This file contains all ZIP codes with all optimization metrics.\n")

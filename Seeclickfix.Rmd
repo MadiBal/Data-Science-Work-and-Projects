@@ -1,0 +1,497 @@
+---
+title: "Seeclickfix"
+output: html_document
+---
+
+
+
+```{r template, do not use}
+library(httr)
+library(jsonlite)
+library(dplyr)
+
+# Robust function using bind_rows to handle column mismatches
+get_ct_seeclickfix_data_robust <- function(city_name = NULL, max_results = 1000) {
+  
+  # Base API URL
+  base_url <- "https://seeclickfix.com/api/v2/issues"
+  
+  # Connecticut bounding box
+  ct_bbox <- list(
+    min_lat = 40.98,
+    max_lat = 42.05,
+    min_lng = -73.74,
+    max_lng = -71.78
+  )
+  
+  # Construct URL
+  if (!is.null(city_name)) {
+    api_url <- paste0(base_url, "?address=", URLencode(paste(city_name, "CT", sep = ", ")))
+  } else {
+    api_url <- paste0(base_url, 
+                     "?min_lat=", ct_bbox$min_lat,
+                     "&max_lat=", ct_bbox$max_lat,
+                     "&min_lng=", ct_bbox$min_lng,
+                     "&max_lng=", ct_bbox$max_lng)
+  }
+  
+  api_url <- paste0(api_url, "&per_page=100&status=open,acknowledged,closed")
+  
+  all_data <- list()
+  page <- 1
+  total_records <- 0
+  
+  repeat {
+    current_url <- paste0(api_url, "&page=", page)
+    cat("Fetching page", page, "...\n")
+    
+    response <- GET(current_url, 
+                   add_headers("User-Agent" = "R-seeclickfix-research/1.0"))
+    
+    if (status_code(response) != 200) {
+      cat("HTTP error:", status_code(response), "\n")
+      break
+    }
+    
+    content_data <- content(response, as = "text", encoding = "UTF-8")
+    parsed_data <- fromJSON(content_data, flatten = TRUE)
+    
+    if (length(parsed_data$issues) == 0) {
+      cat("No more data available\n")
+      break
+    }
+    
+    # Convert to data frame
+    page_df <- as.data.frame(parsed_data$issues, stringsAsFactors = FALSE)
+    page_df$page_number <- page
+    page_df$fetch_timestamp <- Sys.time()
+    
+    all_data[[page]] <- page_df
+    total_records <- total_records + nrow(page_df)
+    
+    cat("Retrieved", nrow(page_df), "records. Total:", total_records, "\n")
+    
+    if (total_records >= max_results) break
+    page <- page + 1
+    if (page > 50) break
+    Sys.sleep(3)
+  }
+  
+  # Use bind_rows instead of rbind - it handles mismatched columns
+  if (length(all_data) > 0) {
+    final_data <- bind_rows(all_data)
+    return(final_data)
+  } else {
+    return(data.frame())
+  }
+}
+
+
+
+# Use the function
+ct_data <- get_ct_seeclickfix_data_robust(max_results = 500)
+new_haven_data <- get_ct_seeclickfix_data_robust(city_name = "New Haven", max_results = 200)
+
+# Function to flatten list columns for CSV export
+flatten_for_csv <- function(df) {
+  # Convert any list columns to character strings
+  for (col in names(df)) {
+    if (is.list(df[[col]])) {
+      df[[col]] <- sapply(df[[col]], function(x) {
+        if (is.null(x) || length(x) == 0) {
+          return(NA)
+        } else if (length(x) == 1) {
+          return(as.character(x))
+        } else {
+          return(paste(x, collapse = "; "))
+        }
+      })
+    }
+  }
+  return(df)
+}
+
+# Flatten the data before saving
+ct_data_flat <- flatten_for_csv(ct_data)
+new_haven_data_flat <- flatten_for_csv(new_haven_data)
+
+# Save to CSV files
+write.csv(ct_data_flat, "connecticut_data.csv", row.names = FALSE)
+write.csv(new_haven_data_flat, "new_haven_data.csv", row.names = FALSE)
+
+# Print confirmation
+cat("Saved", nrow(ct_data_flat), "CT records to connecticut_data.csv\n")
+cat("Saved", nrow(new_haven_data_flat), "New Haven records to new_haven_data.csv\n")
+```
+
+
+```{r for just new haven in 2024}
+library(httr)
+library(jsonlite)
+library(dplyr)
+
+# Download ALL New Haven 2024 SeeClickFix reports - FIXED VERSION
+get_all_new_haven_2024_data <- function() {
+  
+  # Base API URL with verified New Haven place_url
+  base_url <- "https://seeclickfix.com/api/v2/issues"
+  
+  # 2024 date range in ISO 8601 format (required)
+  start_date <- "2024-01-01T00:00:00Z"
+  end_date <- "2024-12-31T23:59:59Z"
+  
+  # Mandatory User-Agent header (2024 requirement)
+  headers <- c("User-Agent" = "R-NewHaven-Research/1.0 (research@example.com)")
+  
+  # Base parameters for New Haven - FIXED: Added "archived" status
+  base_params <- list(
+    place_url = "new-haven",
+    after = start_date,
+    before = end_date,
+    per_page = 100,  # Maximum allowed
+    status = "open,acknowledged,closed,archived"  # FIXED: Include all 4 status types
+  )
+  
+  all_data <- list()
+  page <- 1
+  total_records <- 0
+  max_retries <- 3
+  
+  cat("=== DOWNLOADING ALL NEW HAVEN 2024 SEECLICKFIX REPORTS ===\n")
+  cat("Using fixed API parameters and proper pagination...\n")
+  cat("Rate limiting: 3 seconds between requests\n\n")
+  
+  repeat {
+    # Build URL with current page
+    current_params <- c(base_params, list(page = page))
+    query_string <- paste(names(current_params), current_params, sep = "=", collapse = "&")
+    current_url <- paste0(base_url, "?", query_string)
+    
+    cat("Page", page, "...")
+    
+    # Retry logic for rate limiting and temporary errors
+    retry_count <- 0
+    response <- NULL
+    
+    while (retry_count < max_retries) {
+      response <- GET(current_url, add_headers(.headers = headers), timeout(30))
+      
+      if (status_code(response) == 200) {
+        break  # Success
+      } else if (status_code(response) == 429) {
+        # Rate limited - check Retry-After header
+        retry_after <- as.numeric(headers(response)[["retry-after"]])
+        if (is.na(retry_after)) retry_after <- 60  # Default fallback
+        cat(" Rate limited. Waiting", retry_after + 5, "seconds...\n")
+        Sys.sleep(retry_after + 5)
+        retry_count <- retry_count + 1
+      } else if (status_code(response) %in% c(500, 502, 503, 504)) {
+        # Server error - retry with exponential backoff
+        wait_time <- 2^retry_count * 5
+        cat(" Server error", status_code(response), ". Retrying in", wait_time, "seconds...\n")
+        Sys.sleep(wait_time)
+        retry_count <- retry_count + 1
+      } else {
+        # Other error - log and break
+        cat(" HTTP error:", status_code(response), "\n")
+        if (retry_count == 0) {
+          cat(" Response content:", content(response, "text"), "\n")
+        }
+        break
+      }
+    }
+    
+    # Check if we got a successful response
+    if (is.null(response) || status_code(response) != 200) {
+      if (retry_count >= max_retries) {
+        cat(" Max retries exceeded. Stopping.\n")
+      }
+      break
+    }
+    
+    # Parse response
+    tryCatch({
+      content_text <- content(response, as = "text", encoding = "UTF-8")
+      parsed_data <- fromJSON(content_text, flatten = TRUE)
+    }, error = function(e) {
+      cat(" JSON parsing error:", e$message, "\n")
+      return(NULL)
+    })
+    
+    # Check if we have issues data
+    if (is.null(parsed_data$issues) || length(parsed_data$issues) == 0) {
+      cat(" No data\n")
+      break
+    }
+    
+    # Convert to data frame
+    page_df <- tryCatch({
+      as.data.frame(parsed_data$issues, stringsAsFactors = FALSE)
+    }, error = function(e) {
+      cat(" Data frame conversion error:", e$message, "\n")
+      return(NULL)
+    })
+    
+    if (is.null(page_df) || nrow(page_df) == 0) {
+      cat(" No valid records\n")
+      break
+    }
+    
+    # Additional 2024 filtering (safety check) - FIXED: Better date parsing
+    if ("created_at" %in% names(page_df)) {
+      # Extract date properly from ISO 8601 timestamp
+      page_df$created_date <- tryCatch({
+        as.Date(substr(page_df$created_at, 1, 10))
+      }, error = function(e) {
+        # Fallback for different date formats
+        as.Date(page_df$created_at)
+      })
+      
+      original_count <- nrow(page_df)
+      valid_dates <- !is.na(page_df$created_date)
+      page_df <- page_df[valid_dates & 
+                        page_df$created_date >= as.Date("2024-01-01") & 
+                        page_df$created_date <= as.Date("2024-12-31"), ]
+      
+      if (nrow(page_df) < original_count) {
+        cat(" Filtered", original_count - nrow(page_df), "non-2024 records.")
+      }
+    }
+    
+    # Skip if no records after filtering
+    if (nrow(page_df) == 0) {
+      cat(" No 2024 records after filtering\n")
+      # Check pagination metadata to see if we should continue
+      if (!is.null(parsed_data$metadata$pagination$next_page)) {
+        page <- page + 1
+        Sys.sleep(3)
+        next
+      } else {
+        break
+      }
+    }
+    
+    # Add metadata
+    page_df$page_number <- page
+    page_df$fetch_timestamp <- Sys.time()
+    page_df$data_source <- "New Haven 2024 SeeClickFix"
+    
+    # Store data
+    all_data[[length(all_data) + 1]] <- page_df
+    total_records <- total_records + nrow(page_df)
+    
+    cat(" Got", nrow(page_df), "records. Total:", total_records, "\n")
+    
+    # Check pagination metadata for continuation
+    has_next_page <- FALSE
+    if (!is.null(parsed_data$metadata) && !is.null(parsed_data$metadata$pagination)) {
+      pagination <- parsed_data$metadata$pagination
+      has_next_page <- !is.null(pagination$next_page) && !is.na(pagination$next_page)
+      
+      # Also check if we have fewer records than requested (indicates last page)
+      if (nrow(page_df) < 100) {
+        has_next_page <- FALSE
+        cat(" Received fewer than 100 records - assuming last page\n")
+      }
+    } else {
+      # Fallback: if no pagination metadata, assume more pages exist until we get empty response
+      has_next_page <- nrow(page_df) == 100
+    }
+    
+    if (!has_next_page) {
+      cat(" Reached end of data (pagination indicates no more pages)\n")
+      break
+    }
+    
+    # Safety limit
+    if (page >= 500) {
+      cat(" Reached safety limit (500 pages). If more data exists, increase limit.\n")
+      break
+    }
+    
+    page <- page + 1
+    
+    # Rate limiting - respect 20 requests per minute limit
+    Sys.sleep(3)
+  }
+  
+  # Combine all data
+  if (length(all_data) > 0) {
+    final_data <- bind_rows(all_data)
+    cat("\n✓ Download complete! Retrieved", nrow(final_data), "total records\n")
+    return(final_data)
+  } else {
+    cat("\n❌ No data retrieved!\n")
+    return(data.frame())
+  }
+}
+
+# Enhanced function to flatten list columns for CSV export
+flatten_for_csv <- function(df) {
+  for (col in names(df)) {
+    if (is.list(df[[col]])) {
+      df[[col]] <- sapply(df[[col]], function(x) {
+        if (is.null(x) || length(x) == 0) {
+          return(NA)
+        } else if (length(x) == 1) {
+          return(as.character(x))
+        } else {
+          # Handle nested objects
+          if (is.list(x) && !is.null(names(x))) {
+            # Convert named list to key:value pairs
+            return(paste(names(x), x, sep = ":", collapse = "; "))
+          } else {
+            return(paste(x, collapse = "; "))
+          }
+        }
+      })
+    }
+  }
+  return(df)
+}
+
+# Function to test API connectivity first
+test_api_connection <- function() {
+  cat("=== TESTING API CONNECTION ===\n")
+  
+  headers <- c("User-Agent" = "R-NewHaven-Research/1.0 (research@example.com)")
+  test_url <- "https://seeclickfix.com/api/v2/issues?place_url=new-haven&per_page=1"
+  
+  response <- GET(test_url, add_headers(.headers = headers), timeout(10))
+  
+  if (status_code(response) == 200) {
+    content_data <- content(response, "parsed")
+    if (!is.null(content_data$issues) && length(content_data$issues) > 0) {
+      cat("✓ API connection successful\n")
+      cat("✓ New Haven place_url parameter working\n")
+      if (!is.null(content_data$metadata$pagination)) {
+        cat("✓ Pagination metadata available\n")
+      }
+      return(TRUE)
+    } else {
+      cat("❌ API responded but no issues found\n")
+      return(FALSE)
+    }
+  } else {
+    cat("❌ API connection failed. HTTP status:", status_code(response), "\n")
+    cat("Response:", content(response, "text"), "\n")
+    return(FALSE)
+  }
+}
+
+# Main execution
+cat("Starting comprehensive New Haven 2024 SeeClickFix data download...\n")
+cat("Please update the User-Agent email in the code before running!\n\n")
+
+# Test connection first
+if (!test_api_connection()) {
+  stop("API connection test failed. Please check your internet connection and try again.")
+}
+
+cat("\n")
+
+# Execute the download
+new_haven_2024_data <- get_all_new_haven_2024_data()
+
+# Process and save the data
+if (nrow(new_haven_2024_data) > 0) {
+  
+  cat("\n=== PROCESSING DATA FOR CSV EXPORT ===\n")
+  new_haven_2024_flat <- flatten_for_csv(new_haven_2024_data)
+  
+  # Create filename with timestamp
+  timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+  filename <- paste0("new_haven_2024_complete_", timestamp, ".csv")
+  
+  # Save to CSV
+  write.csv(new_haven_2024_flat, filename, row.names = FALSE)
+  
+  # Generate comprehensive summary report
+  cat("\n=== DOWNLOAD SUMMARY ===\n")
+  cat("✓ Total records downloaded:", nrow(new_haven_2024_flat), "\n")
+  cat("✓ File saved as:", filename, "\n")
+  cat("✓ File location:", file.path(getwd(), filename), "\n")
+  cat("✓ File size:", round(file.size(filename) / 1024 / 1024, 2), "MB\n")
+  
+  # Date range verification - FIXED: Better date parsing
+  if ("created_at" %in% names(new_haven_2024_flat)) {
+    dates <- tryCatch({
+      as.Date(substr(new_haven_2024_flat$created_at, 1, 10))
+    }, error = function(e) {
+      as.Date(new_haven_2024_flat$created_at)
+    })
+    
+    valid_dates <- !is.na(dates)
+    if (sum(valid_dates) > 0) {
+      cat("✓ Date range:", min(dates[valid_dates]), "to", max(dates[valid_dates]), "\n")
+      
+      # Monthly breakdown
+      monthly_counts <- table(format(dates[valid_dates], "%Y-%m"))
+      cat("\n=== MONTHLY BREAKDOWN ===\n")
+      for (i in 1:length(monthly_counts)) {
+        cat("  ", names(monthly_counts)[i], ":", monthly_counts[i], "reports\n")
+      }
+    } else {
+      cat("⚠ Date parsing issues detected\n")
+    }
+  }
+  
+  # Status breakdown
+  if ("status" %in% names(new_haven_2024_flat)) {
+    cat("\n=== STATUS BREAKDOWN ===\n")
+    status_counts <- table(new_haven_2024_flat$status)
+    for (i in 1:length(status_counts)) {
+      cat("  ", names(status_counts)[i], ":", status_counts[i], "\n")
+    }
+  }
+  
+  # Issue types (top 15)
+  if ("request_type.title" %in% names(new_haven_2024_flat)) {
+    cat("\n=== TOP 15 ISSUE TYPES ===\n")
+    type_counts <- sort(table(new_haven_2024_flat$request_type.title), decreasing = TRUE)
+    top_15 <- head(type_counts, 15)
+    for (i in 1:length(top_15)) {
+      cat("  ", names(top_15)[i], ":", top_15[i], "\n")
+    }
+  }
+  
+  # Data quality checks
+  cat("\n=== DATA QUALITY CHECKS ===\n")
+  cat("✓ Unique issue IDs:", length(unique(new_haven_2024_flat$id)), "\n")
+  if ("address" %in% names(new_haven_2024_flat)) {
+    non_empty_addresses <- sum(!is.na(new_haven_2024_flat$address) & new_haven_2024_flat$address != "")
+    cat("✓ Records with addresses:", non_empty_addresses, "(", 
+        round(non_empty_addresses/nrow(new_haven_2024_flat)*100, 1), "%)\n")
+  }
+  if ("lat" %in% names(new_haven_2024_flat) && "lng" %in% names(new_haven_2024_flat)) {
+    geo_records <- sum(!is.na(new_haven_2024_flat$lat) & !is.na(new_haven_2024_flat$lng))
+    cat("✓ Records with coordinates:", geo_records, "(", 
+        round(geo_records/nrow(new_haven_2024_flat)*100, 1), "%)\n")
+  }
+  
+  # Sample data preview
+  cat("\n=== SAMPLE DATA (First 3 Records) ===\n")
+  preview_cols <- c("id", "status", "summary", "address", "created_at", "request_type.title")
+  available_cols <- preview_cols[preview_cols %in% names(new_haven_2024_flat)]
+  if (length(available_cols) > 0) {
+    print(head(new_haven_2024_flat[, available_cols], 3))
+  }
+  
+  cat("\n=== SUCCESS! ===\n")
+  cat("Complete 2024 New Haven SeeClickFix dataset downloaded successfully.\n")
+  cat("Data saved to:", filename, "\n")
+  
+} else {
+  cat("\n❌ ERROR: No data was retrieved\n")
+  cat("Troubleshooting steps:\n")
+  cat("1. Check internet connection\n")
+  cat("2. Verify the User-Agent email is updated in the code\n")
+  cat("3. Try running the test_api_connection() function separately\n")
+  cat("4. Check if SeeClickFix API is experiencing downtime\n")
+  cat("5. Consider using a VPN if requests are being blocked\n")
+}
+
+cat("\n=== DOWNLOAD COMPLETE ===\n")
+```
+
+

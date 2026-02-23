@@ -1,0 +1,1982 @@
+---
+title: "DataHaven 2024 Pilot Study: Family and Community Wellbeing Analysis"
+subtitle: "Comprehensive Demographic Analysis of Caregiver Variables"
+author: "DataHaven"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+    keep_tex: false
+geometry: margin=1in
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{multirow}
+  - \usepackage{wrapfig}
+  - \usepackage{float}
+  - \usepackage{colortbl}
+  - \usepackage{pdflscape}
+  - \usepackage{tabu}
+  - \usepackage{threeparttable}
+  - \usepackage{threeparttablex}
+  - \usepackage[normalem]{ulem}
+  - \usepackage{makecell}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  results = 'asis',
+  fig.pos = 'H'
+)
+
+# Load required libraries
+library(tidyverse)
+library(survey)
+library(srvyr)
+library(knitr)
+library(kableExtra)
+library(broom)
+
+# Read the data
+df <- read_csv("dcws24_tbl.csv")
+
+# Data preparation and cleaning
+df_clean <- df %>%
+  filter(fcintro == "Yes") %>%
+  mutate(
+    region = case_when(
+      cttown == "Hartford" ~ "Hartford",
+      !is.na(cttown) & cttown != "Hartford" ~ "Other CT",
+      TRUE ~ NA_character_
+    ),
+    income_group = case_when(
+      income == "<$30K" ~ "Low Income",
+      income == "$30K-$100K" ~ "Middle Income", 
+      income == ">$100K" ~ "High Income",
+      TRUE ~ NA_character_
+    ),
+    income_binary = case_when(
+      income == "<$30K" ~ "Low Income",
+      income %in% c("$30K-$100K", ">$100K") ~ "Higher Income",
+      TRUE ~ NA_character_
+    ),
+    race_clean = case_when(
+      racer == "Caucasian/White" ~ "White",
+      racer == "African American/Black" ~ "Black", 
+      racer == "Hispanic/Latino" ~ "Latino",
+      racer == "Asian" ~ "Asian",
+      TRUE ~ "Other"
+    ),
+    race_main = case_when(
+      race_clean %in% c("White", "Black", "Latino") ~ race_clean,
+      TRUE ~ "Other"
+    ),
+    race_main = factor(race_main, levels = c("White", "Black", "Latino", "Other")),
+    region = factor(region, levels = c("Hartford", "Other CT")),
+    income_binary = factor(income_binary, levels = c("Higher Income", "Low Income"))
+  ) %>%
+  group_by(ctzip) %>%
+  mutate(zip_n = n()) %>%
+  ungroup() %>%
+  filter(zip_n >= 3) %>%
+  mutate(
+    zip_income_proxy = case_when(
+      income == ">$100K" ~ 4,
+      income == "$30K-$100K" ~ 3,
+      income == "<$30K" ~ 2,
+      TRUE ~ 2.5
+    )
+  ) %>%
+  group_by(ctzip) %>%
+  mutate(zip_avg_income = mean(zip_income_proxy, na.rm = TRUE)) %>%
+  ungroup() %>%
+  mutate(
+    zip_income_quartile = ntile(zip_avg_income, 4),
+    zip_income_group = case_when(
+      zip_income_quartile %in% c(1, 2) ~ "Low Income ZIP",
+      zip_income_quartile %in% c(3, 4) ~ "High Income ZIP",
+      TRUE ~ NA_character_
+    ),
+    zip_income_group = factor(zip_income_group, levels = c("High Income ZIP", "Low Income ZIP"))
+  )
+
+# Create survey design objects
+svy_unweighted <- df_clean %>% as_survey_design(ids = 1)
+svy_weighted <- df_clean %>% as_survey_design(ids = 1, weights = weight)
+
+# Helper functions
+order_likert_responses <- function(var_data, var_name) {
+  if (str_detect(var_name, "fcpr")) {
+    factor(var_data, levels = c(
+      "This is NOT AT ALL LIKE me or what I believe",
+      "This is NOT MUCH LIKE me or what I believe", 
+      "This is A LITTLE LIKE me or what I believe",
+      "This is LIKE me or what I believe",
+      "This is VERY MUCH LIKE me or what I believe",
+      "[DO NOT READ] Don't know/Refused"
+    ))
+  } else if (str_detect(var_name, "hbiss")) {
+    factor(var_data, levels = c(
+      "Strongly disagree",
+      "Somewhat disagree", 
+      "Somewhat agree",
+      "Strongly agree",
+      "[DO NOT READ] Don't know"
+    ))
+  } else if (var_name == "fcmatc2") {
+    factor(var_data, levels = c(
+      "Very dissatisfied",
+      "Somewhat dissatisfied",
+      "Neither satisfied nor dissatisfied", 
+      "Somewhat satisfied",
+      "Very satisfied"
+    ))
+  } else {
+    factor(var_data)
+  }
+}
+
+create_binary_var <- function(var_data, var_name) {
+  if (str_detect(var_name, "fcpr")) {
+    case_when(
+      var_data %in% c("This is LIKE me or what I believe", 
+                     "This is VERY MUCH LIKE me or what I believe") ~ "Agree",
+      var_data %in% c("This is NOT AT ALL LIKE me or what I believe",
+                     "This is NOT MUCH LIKE me or what I believe",
+                     "This is A LITTLE LIKE me or what I believe") ~ "Disagree",
+      TRUE ~ NA_character_
+    )
+  } else if (str_detect(var_name, "hbiss")) {
+    case_when(
+      var_data %in% c("Somewhat agree", "Strongly agree") ~ "Agree",
+      var_data %in% c("Somewhat disagree", "Strongly disagree") ~ "Disagree", 
+      TRUE ~ NA_character_
+    )
+  } else if (var_name == "fcmatc2") {
+    case_when(
+      var_data %in% c("Somewhat satisfied", "Very satisfied") ~ "Satisfied",
+      var_data %in% c("Somewhat dissatisfied", "Very dissatisfied") ~ "Dissatisfied",
+      TRUE ~ NA_character_
+    )
+  } else {
+    var_data
+  }
+}
+
+perform_stat_test <- function(data, var_name, group_var) {
+  test_data <- data %>%
+    filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA",
+           !is.na(!!sym(group_var))) %>%
+    mutate(
+      binary_var = create_binary_var(!!sym(var_name), var_name),
+      binary_outcome = case_when(
+        str_detect(var_name, "fcpr|fcmatc2") ~ ifelse(binary_var == "Agree" | binary_var == "Satisfied", 1, 0),
+        str_detect(var_name, "hbiss") ~ ifelse(binary_var == "Agree", 1, 0),
+        TRUE ~ NA_real_
+      )
+    ) %>%
+    filter(!is.na(binary_outcome))
+  
+  if (nrow(test_data) < 10) return(NULL)
+  
+  if (group_var == "region" && length(unique(test_data[[group_var]])) == 2) {
+    tryCatch({
+      test_result <- chisq.test(test_data$binary_outcome, test_data[[group_var]])
+      return(list(
+        test = "chi_square",
+        p_value = test_result$p.value,
+        significant = test_result$p.value < 0.05
+      ))
+    }, error = function(e) return(NULL))
+  }
+  return(NULL)
+}
+
+create_comprehensive_table <- function(var_name, weighted = FALSE) {
+  
+  if (weighted) {
+    data_source <- svy_weighted
+  } else {
+    data_source <- df_clean
+  }
+  
+  # Hartford vs Other CT
+  hartford_full <- if (weighted) {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA") %>%
+      group_by(region, !!sym(var_name)) %>%
+      summarise(n = survey_total(na.rm = TRUE), .groups = "drop") %>%
+      group_by(region) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  } else {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA") %>%
+      count(region, !!sym(var_name)) %>%
+      group_by(region) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  }
+  
+  hartford_binary <- if (weighted) {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA") %>%
+      mutate(binary_var = create_binary_var(!!sym(var_name), var_name)) %>%
+      filter(!is.na(binary_var)) %>%
+      group_by(region, binary_var) %>%
+      summarise(n = survey_total(na.rm = TRUE), .groups = "drop") %>%
+      group_by(region) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  } else {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA") %>%
+      mutate(binary_var = create_binary_var(!!sym(var_name), var_name)) %>%
+      filter(!is.na(binary_var)) %>%
+      count(region, binary_var) %>%
+      group_by(region) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  }
+  
+  # Race/Ethnicity
+  race_binary <- if (weighted) {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA", !is.na(race_main)) %>%
+      mutate(binary_var = create_binary_var(!!sym(var_name), var_name)) %>%
+      filter(!is.na(binary_var)) %>%
+      group_by(race_main, binary_var) %>%
+      summarise(n = survey_total(na.rm = TRUE), .groups = "drop") %>%
+      group_by(race_main) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  } else {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA", !is.na(race_main)) %>%
+      mutate(binary_var = create_binary_var(!!sym(var_name), var_name)) %>%
+      filter(!is.na(binary_var)) %>%
+      count(race_main, binary_var) %>%
+      group_by(race_main) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  }
+  
+  # Income
+  income_binary <- if (weighted) {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA", !is.na(income_binary)) %>%
+      mutate(binary_var = create_binary_var(!!sym(var_name), var_name)) %>%
+      filter(!is.na(binary_var)) %>%
+      group_by(income_binary, binary_var) %>%
+      summarise(n = survey_total(na.rm = TRUE), .groups = "drop") %>%
+      group_by(income_binary) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  } else {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA", !is.na(income_binary)) %>%
+      mutate(binary_var = create_binary_var(!!sym(var_name), var_name)) %>%
+      filter(!is.na(binary_var)) %>%
+      count(income_binary, binary_var) %>%
+      group_by(income_binary) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  }
+  
+  # ZIP Income
+  zip_binary <- if (weighted) {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA", !is.na(zip_income_group)) %>%
+      mutate(binary_var = create_binary_var(!!sym(var_name), var_name)) %>%
+      filter(!is.na(binary_var)) %>%
+      group_by(zip_income_group, binary_var) %>%
+      summarise(n = survey_total(na.rm = TRUE), .groups = "drop") %>%
+      group_by(zip_income_group) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  } else {
+    data_source %>%
+      filter(!is.na(!!sym(var_name)), !!sym(var_name) != "NA", !is.na(zip_income_group)) %>%
+      mutate(binary_var = create_binary_var(!!sym(var_name), var_name)) %>%
+      filter(!is.na(binary_var)) %>%
+      count(zip_income_group, binary_var) %>%
+      group_by(zip_income_group) %>%
+      mutate(pct = round(n / sum(n) * 100, 1)) %>%
+      ungroup()
+  }
+  
+  # Statistical test
+  stat_test <- if (!weighted) perform_stat_test(data_source, var_name, "region") else NULL
+  
+  return(list(
+    hartford_full = hartford_full,
+    hartford_binary = hartford_binary,
+    race_binary = race_binary,
+    income_binary = income_binary,
+    zip_binary = zip_binary,
+    stat_test = stat_test
+  ))
+}
+
+# Sample size summary
+sample_summary <- df_clean %>%
+  summarise(
+    `Total Caregivers` = n(),
+    `Hartford` = sum(region == "Hartford", na.rm = TRUE),
+    `Other CT` = sum(region == "Other CT", na.rm = TRUE),
+    `White` = sum(race_main == "White", na.rm = TRUE),
+    `Black` = sum(race_main == "Black", na.rm = TRUE),
+    `Latino` = sum(race_main == "Latino", na.rm = TRUE),
+    `Higher Income` = sum(income_binary == "Higher Income", na.rm = TRUE),
+    `Low Income` = sum(income_binary == "Low Income", na.rm = TRUE)
+  )
+```
+
+# Executive Summary
+
+This report presents comprehensive demographic analysis of caregiver variables from the DataHaven 2024 pilot study. The analysis includes `r nrow(df_clean)` caregivers who completed the extended family module, representing families across Connecticut with focused attention on Hartford disparities.
+
+## Key Findings Summary
+
+- **Hartford caregivers consistently report lower resilience** across multiple measures compared to other Connecticut areas
+- **Significant disparities exist by race/ethnicity** with notable differences between White, Black, and Latino caregivers  
+- **Income-related differences** appear in both individual income and ZIP code-level income measures
+- **Housing barriers** are substantial, with most respondents citing affordability concerns
+- **Sample sizes support reliable comparisons** for major demographic groups
+
+```{r sample-table}
+kable(t(sample_summary), 
+      col.names = "N",
+      caption = "Sample Sizes by Demographic Groups",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+\newpage
+
+# Parent Resilience Variables
+
+Parent resilience variables measure caregivers' confidence and skills in parenting situations. Responses range from "This is NOT AT ALL LIKE me" to "This is VERY MUCH LIKE me." For binary analysis, "Agree" combines "Like me" and "Very much like me" responses.
+
+## FCPR1: Problem-Solving Strength
+
+*"I have the strength within myself to solve problems that happen in my life"*
+
+### Unweighted Analysis
+
+```{r fcpr1-analysis}
+fcpr1_results <- create_comprehensive_table("fcpr1", weighted = FALSE)
+
+# Full distribution table
+hartford_full_table <- fcpr1_results$hartford_full %>%
+  mutate(fcpr1 = order_likert_responses(fcpr1, "fcpr1")) %>%
+  select(region, fcpr1, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = fcpr1)
+
+kable(hartford_full_table,
+      caption = "FCPR1: Problem-Solving Strength - Full Response Distribution (\\%)",
+      booktabs = TRUE,
+      longtable = TRUE) %>%
+  kable_styling(latex_options = c("repeat_header")) %>%
+  column_spec(1, width = "8cm")
+
+# Binary distribution table  
+hartford_binary_table <- fcpr1_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+kable(hartford_binary_table,
+      caption = "FCPR1: Problem-Solving Strength - Binary Distribution (\\%)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+# Race/ethnicity table
+race_table <- fcpr1_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(race_table,
+      caption = "FCPR1: Problem-Solving Strength by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+# Income table
+income_table <- fcpr1_results$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(income_table,
+      caption = "FCPR1: Problem-Solving Strength by Income Level (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+# Statistical significance note
+if (!is.null(fcpr1_results$stat_test) && fcpr1_results$stat_test$significant) {
+  cat("**Statistical Note:** Difference between Hartford and Other CT is statistically significant (p < 0.05).\n\n")
+}
+```
+
+### Weighted Analysis
+
+```{r fcpr1-analysis-weighted}
+fcpr1_results_weighted <- create_comprehensive_table("fcpr1", weighted = TRUE)
+
+# Binary distribution table  
+hartford_binary_table_weighted <- fcpr1_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR1: Problem-Solving Strength - Weighted Binary Distribution (\\%)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+# Race/ethnicity table
+race_table_weighted <- fcpr1_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(race_table_weighted,
+      caption = "FCPR1: Problem-Solving Strength by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+# Income table
+income_table_weighted <- fcpr1_results_weighted$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(income_table_weighted,
+      caption = "FCPR1: Problem-Solving Strength by Income Level - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+**Key Finding:** Hartford caregivers report notably lower problem-solving confidence. The largest disparities appear between racial/ethnic groups and income levels.
+
+## FCPR2: Managing Daily Responsibilities
+
+*"I manage the daily responsibilities of being a parent or caregiver"*
+
+### Unweighted Analysis
+
+```{r fcpr2-analysis}
+fcpr2_results <- create_comprehensive_table("fcpr2", weighted = FALSE)
+
+# Binary tables for all demographics
+hartford_binary_table <- fcpr2_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr2_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+income_table <- fcpr2_results$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR2: Managing Daily Responsibilities - Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR2: Managing Daily Responsibilities by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(income_table,
+      caption = "FCPR2: Managing Daily Responsibilities by Income Level (pct Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr2-analysis-weighted}
+fcpr2_results_weighted <- create_comprehensive_table("fcpr2", weighted = TRUE)
+
+# Binary tables for all demographics
+hartford_binary_table_weighted <- fcpr2_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr2_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+income_table_weighted <- fcpr2_results_weighted$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR2: Managing Daily Responsibilities - Weighted Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR2: Managing Daily Responsibilities by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(income_table_weighted,
+      caption = "FCPR2: Managing Daily Responsibilities by Income Level - Weighted (pct Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## FCPR3: Social Support - Someone to Ask for Help  
+
+*"I have someone I can ask for help when I need it"*
+
+### Unweighted Analysis
+
+```{r fcpr3-analysis}
+fcpr3_results <- create_comprehensive_table("fcpr3", weighted = FALSE)
+
+hartford_binary_table <- fcpr3_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr3_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+income_table <- fcpr3_results$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR3: Someone to Ask for Help - Hartford vs Other CT (pct by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR3: Someone to Ask for Help by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(income_table,
+      caption = "FCPR3: Someone to Ask for Help by Income Level (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr3-analysis-weighted}
+fcpr3_results_weighted <- create_comprehensive_table("fcpr3", weighted = TRUE)
+
+hartford_binary_table_weighted <- fcpr3_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr3_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+income_table_weighted <- fcpr3_results_weighted$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR3: Someone to Ask for Help - Weighted Hartford vs Other CT (pct by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR3: Someone to Ask for Help by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(income_table_weighted,
+      caption = "FCPR3: Someone to Ask for Help by Income Level - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## FCPR4: Social Support - Someone to Talk To
+
+*"I have someone to talk to about important things"*
+
+### Unweighted Analysis
+
+```{r fcpr4-analysis}
+fcpr4_results <- create_comprehensive_table("fcpr4", weighted = FALSE)
+
+hartford_binary_table <- fcpr4_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr4_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+income_table <- fcpr4_results$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR4: Someone to Talk To - Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR4: Someone to Talk To by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(income_table,
+      caption = "FCPR4: Someone to Talk To by Income Level (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr4-analysis-weighted}
+fcpr4_results_weighted <- create_comprehensive_table("fcpr4", weighted = TRUE)
+
+hartford_binary_table_weighted <- fcpr4_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr4_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+income_table_weighted <- fcpr4_results_weighted$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR4: Someone to Talk To - Weighted Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR4: Someone to Talk To by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(income_table_weighted,
+      caption = "FCPR4: Someone to Talk To by Income Level - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## FCPR5: Learning About Community Resources
+
+*"I make an effort to learn about the resources in my community that might be helpful for me"*
+
+### Unweighted Analysis
+
+```{r fcpr5-analysis}
+fcpr5_results <- create_comprehensive_table("fcpr5", weighted = FALSE)
+
+hartford_binary_table <- fcpr5_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr5_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+income_table <- fcpr5_results$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR5: Learning Community Resources - Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR5: Learning Community Resources by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(income_table,
+      caption = "FCPR5: Learning Community Resources by Income Level (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr5-analysis-weighted}
+fcpr5_results_weighted <- create_comprehensive_table("fcpr5", weighted = TRUE)
+
+hartford_binary_table_weighted <- fcpr5_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr5_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+income_table_weighted <- fcpr5_results_weighted$income_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(income_binary, pct) %>%
+  pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR5: Learning Community Resources - Weighted Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR5: Learning Community Resources by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(income_table_weighted,
+      caption = "FCPR5: Learning Community Resources by Income Level - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## FCPR6: Persistence with Services
+
+*"I don't give up when I run into problems trying to get the services I need"*
+
+### Unweighted Analysis
+
+```{r fcpr6-analysis}
+fcpr6_results <- create_comprehensive_table("fcpr6", weighted = FALSE)
+
+hartford_binary_table <- fcpr6_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr6_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR6: Persistence with Services - Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR6: Persistence with Services by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr6-analysis-weighted}
+fcpr6_results_weighted <- create_comprehensive_table("fcpr6", weighted = TRUE)
+
+hartford_binary_table_weighted <- fcpr6_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr6_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR6: Persistence with Services - Weighted Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR6: Persistence with Services by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## FCPR7: Ensuring Children Get Attention
+
+*"I make sure my child or children gets the attention they need even when my life is stressful"*
+
+### Unweighted Analysis
+
+```{r fcpr7-analysis}
+fcpr7_results <- create_comprehensive_table("fcpr7", weighted = FALSE)
+
+hartford_binary_table <- fcpr7_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr7_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR7: Ensuring Children Get Attention - Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR7: Ensuring Children Get Attention by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr7-analysis-weighted}
+fcpr7_results_weighted <- create_comprehensive_table("fcpr7", weighted = TRUE)
+
+hartford_binary_table_weighted <- fcpr7_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr7_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR7: Ensuring Children Get Attention - Weighted Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR7: Ensuring Children Get Attention by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## FCPR8: Helping Children Manage Frustration
+
+*"I help my children learn to manage frustration"*
+
+### Unweighted Analysis
+
+```{r fcpr8-analysis}
+fcpr8_results <- create_comprehensive_table("fcpr8", weighted = FALSE)
+
+hartford_binary_table <- fcpr8_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr8_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR8: Helping Children Manage Frustration - Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR8: Helping Children Manage Frustration by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr8-analysis-weighted}
+fcpr8_results_weighted <- create_comprehensive_table("fcpr8", weighted = TRUE)
+
+hartford_binary_table_weighted <- fcpr8_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr8_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR8: Helping Children Manage Frustration - Weighted Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR8: Helping Children Manage Frustration by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## FCPR9: Knowledge of Child Development Resources
+
+*"I know where I can get helpful information about children's development at different ages"*
+
+### Unweighted Analysis
+
+```{r fcpr9-analysis}
+fcpr9_results <- create_comprehensive_table("fcpr9", weighted = FALSE)
+
+hartford_binary_table <- fcpr9_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr9_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR9: Knowledge of Child Development Resources - Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR9: Knowledge of Child Development Resources by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr9-analysis-weighted}
+fcpr9_results_weighted <- create_comprehensive_table("fcpr9", weighted = TRUE)
+
+hartford_binary_table_weighted <- fcpr9_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr9_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR9: Knowledge of Child Development Resources - Weighted Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR9: Knowledge of Child Development Resources by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+## FCPR10: Parenting Impact on Child Development
+
+*"The way parents or caregivers treat children when they are young will influence how children act as they get older"*
+
+### Unweighted Analysis
+
+```{r fcpr10-analysis}
+fcpr10_results <- create_comprehensive_table("fcpr10", weighted = FALSE)
+
+hartford_binary_table <- fcpr10_results$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table <- fcpr10_results$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table,
+      caption = "FCPR10: Parenting Impact on Development - Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table,
+      caption = "FCPR10: Parenting Impact on Development by Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Analysis
+
+```{r fcpr10-analysis-weighted}
+fcpr10_results_weighted <- create_comprehensive_table("fcpr10", weighted = TRUE)
+
+hartford_binary_table_weighted <- fcpr10_results_weighted$hartford_binary %>%
+  select(region, binary_var, pct) %>%
+  pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+  rename(Response = binary_var)
+
+race_table_weighted <- fcpr10_results_weighted$race_binary %>%
+  filter(binary_var == "Agree") %>%
+  select(race_main, pct) %>%
+  pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+
+kable(hartford_binary_table_weighted,
+      caption = "FCPR10: Parenting Impact on Development - Weighted Hartford vs Other CT (\\% by Response)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+kable(race_table_weighted,
+      caption = "FCPR10: Parenting Impact on Development by Race/Ethnicity - Weighted (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+\newpage
+
+# Parent Resilience Summary Analysis
+
+## Overall Parent Resilience Patterns
+
+### Unweighted Summary
+
+```{r resilience-summary}
+# Create comprehensive summary table for all resilience variables
+resilience_vars <- paste0("fcpr", 1:10)
+resilience_labels <- c(
+  "Problem-Solving Strength",
+  "Managing Daily Responsibilities", 
+  "Someone to Ask for Help",
+  "Someone to Talk To",
+  "Learning Community Resources",
+  "Persistence with Services",
+  "Ensuring Children Get Attention",
+  "Helping Children Manage Frustration",
+  "Knowledge of Child Development",
+  "Parenting Impact on Development"
+)
+
+# Hartford vs Other CT summary
+hartford_summary <- map2_dfr(resilience_vars, resilience_labels, function(var, label) {
+  results <- create_comprehensive_table(var, weighted = FALSE)
+  hartford_data <- results$hartford_binary %>%
+    filter(binary_var == "Agree") %>%
+    select(region, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0)
+  
+  data.frame(
+    Variable = label,
+    Hartford = hartford_data$Hartford,
+    `Other CT` = hartford_data$`Other CT`,
+    Difference = hartford_data$Hartford - hartford_data$`Other CT`,
+    check.names = FALSE
+  )
+})
+
+kable(hartford_summary,
+      caption = "Parent Resilience Summary: Hartford vs Other CT (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position")) %>%
+  column_spec(4, color = ifelse(is.na(hartford_summary$Difference), "black",
+                               ifelse(hartford_summary$Difference < -5, "red", 
+                               ifelse(hartford_summary$Difference > 5, "blue", "black"))))
+
+# Race/ethnicity summary
+race_summary <- map2_dfr(resilience_vars, resilience_labels, function(var, label) {
+  results <- create_comprehensive_table(var, weighted = FALSE)
+  race_data <- results$race_binary %>%
+    filter(binary_var == "Agree") %>%
+    select(race_main, pct) %>%
+    pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+  
+  if (ncol(race_data) >= 4) {
+    data.frame(
+      Variable = label,
+      White = race_data$White,
+      Black = race_data$Black,
+      Latino = race_data$Latino,
+      check.names = FALSE
+    )
+  } else {
+    NULL
+  }
+}) %>%
+  filter(!is.null(.))
+
+kable(race_summary,
+      caption = "Parent Resilience Summary: By Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+# Income summary
+
+income_summary <- map2_dfr(resilience_vars, resilience_labels, function(var, label) {
+  tryCatch({
+    results <- create_comprehensive_table(var, weighted = FALSE)
+    
+    if (nrow(results$income_binary) == 0) {
+      return(data.frame(
+        Variable = label,
+        `Higher Income` = NA,
+        `Low Income` = NA,
+        Difference = NA,
+        check.names = FALSE
+      ))
+    }
+    
+    income_data <- results$income_binary %>%
+      filter(binary_var == "Agree") %>%
+      select(income_binary, pct)
+    
+    if (nrow(income_data) == 0) {
+      return(data.frame(
+        Variable = label,
+        `Higher Income` = NA,
+        `Low Income` = NA,
+        Difference = NA,
+        check.names = FALSE
+      ))
+    }
+    
+    income_wide <- income_data %>%
+      pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+    
+    higher_income_val <- if("Higher Income" %in% names(income_wide)) income_wide$`Higher Income` else NA
+    low_income_val <- if("Low Income" %in% names(income_wide)) income_wide$`Low Income` else NA
+    
+    data.frame(
+      Variable = label,
+      `Higher Income` = higher_income_val,
+      `Low Income` = low_income_val,
+      Difference = if(!is.na(higher_income_val) && !is.na(low_income_val)) higher_income_val - low_income_val else NA,
+      check.names = FALSE
+    )
+  }, error = function(e) {
+    data.frame(
+      Variable = label,
+      `Higher Income` = NA,
+      `Low Income` = NA,
+      Difference = NA,
+      check.names = FALSE
+    )
+  })
+})
+```
+
+### Weighted Summary
+
+```{r resilience-summary-weighted}
+# Hartford vs Other CT summary
+hartford_summary_weighted <- map2_dfr(resilience_vars, resilience_labels, function(var, label) {
+  results <- create_comprehensive_table(var, weighted = TRUE)
+  hartford_data <- results$hartford_binary %>%
+    filter(binary_var == "Agree") %>%
+    select(region, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0)
+  
+  data.frame(
+    Variable = label,
+    Hartford = hartford_data$Hartford,
+    `Other CT` = hartford_data$`Other CT`,
+    Difference = hartford_data$Hartford - hartford_data$`Other CT`,
+    check.names = FALSE
+  )
+})
+
+kable(hartford_summary_weighted,
+      caption = "Parent Resilience Summary - Weighted: Hartford vs Other CT (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position")) %>%
+  column_spec(4, color = ifelse(is.na(hartford_summary_weighted$Difference), "black",
+                               ifelse(hartford_summary_weighted$Difference < -5, "red", 
+                               ifelse(hartford_summary_weighted$Difference > 5, "blue", "black"))))
+
+# Race/ethnicity summary
+race_summary_weighted <- map2_dfr(resilience_vars, resilience_labels, function(var, label) {
+  results <- create_comprehensive_table(var, weighted = TRUE)
+  race_data <- results$race_binary %>%
+    filter(binary_var == "Agree") %>%
+    select(race_main, pct) %>%
+    pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+  
+  if (ncol(race_data) >= 4) {
+    data.frame(
+      Variable = label,
+      White = race_data$White,
+      Black = race_data$Black,
+      Latino = race_data$Latino,
+      check.names = FALSE
+    )
+  } else {
+    NULL
+  }
+}) %>%
+  filter(!is.null(.))
+
+kable(race_summary_weighted,
+      caption = "Parent Resilience Summary - Weighted: By Race/Ethnicity (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+
+# Income summary
+income_summary_weighted <- map2_dfr(resilience_vars, resilience_labels, function(var, label) {
+  tryCatch({
+    results <- create_comprehensive_table(var, weighted = TRUE)
+    
+    if (nrow(results$income_binary) == 0) {
+      return(data.frame(
+        Variable = label,
+        `Higher Income` = NA,
+        `Low Income` = NA,
+        Difference = NA,
+        check.names = FALSE
+      ))
+    }
+    
+    income_data <- results$income_binary %>%
+      filter(binary_var == "Agree") %>%
+      select(income_binary, pct)
+    
+    if (nrow(income_data) == 0) {
+      return(data.frame(
+        Variable = label,
+        `Higher Income` = NA,
+        `Low Income` = NA,
+        Difference = NA,
+        check.names = FALSE
+      ))
+    }
+    
+    income_wide <- income_data %>%
+      pivot_wider(names_from = income_binary, values_from = pct, values_fill = 0)
+    
+    higher_income_val <- if("Higher Income" %in% names(income_wide)) income_wide$`Higher Income` else NA
+    low_income_val <- if("Low Income" %in% names(income_wide)) income_wide$`Low Income` else NA
+    
+    data.frame(
+      Variable = label,
+      `Higher Income` = higher_income_val,
+      `Low Income` = low_income_val,
+      Difference = if(!is.na(higher_income_val) && !is.na(low_income_val)) higher_income_val - low_income_val else NA,
+      check.names = FALSE
+    )
+  }, error = function(e) {
+    data.frame(
+      Variable = label,
+      `Higher Income` = NA,
+      `Low Income` = NA,
+      Difference = NA,
+      check.names = FALSE
+    )
+  })
+})
+```
+
+\newpage
+
+# Housing Barriers Analysis
+
+Housing barrier variables measure agreement with statements about obstacles to home purchasing. For binary analysis, "Agree" combines "Somewhat agree" and "Strongly agree" responses. **Note:** Sample sizes are small (n~30) - interpret with caution.
+
+## HBISSA: Housing Availability in Budget
+
+*"There are not enough available homes for purchase in my budget"*
+
+### Unweighted Analysis
+
+```{r hbissa-analysis}
+hbissa_results <- create_comprehensive_table("hbissa", weighted = FALSE)
+
+# Check sample size
+sample_size_hbissa <- df_clean %>%
+  filter(!is.na(hbissa), hbissa != "NA") %>%
+  nrow()
+
+cat(paste("**Sample size:** n =", sample_size_hbissa, "\n\n"))
+
+if (nrow(hbissa_results$hartford_binary) > 0) {
+  hartford_binary_table <- hbissa_results$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table,
+        caption = "HBISSA: Not Enough Available Homes in Budget - Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+  
+  if (nrow(hbissa_results$race_binary) > 0) {
+    race_table <- hbissa_results$race_binary %>%
+      filter(binary_var == "Agree") %>%
+      select(race_main, pct) %>%
+      pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+    
+    if (ncol(race_table) > 1) {
+      kable(race_table,
+            caption = "HBISSA: Not Enough Available Homes by Race/Ethnicity (\\% Agree)",
+            booktabs = TRUE) %>%
+        kable_styling(latex_options = c("hold_position"))
+    }
+  }
+} else {
+  cat("Insufficient data for analysis.\n\n")
+}
+```
+
+### Weighted Analysis
+
+```{r hbissa-analysis-weighted}
+hbissa_results_weighted <- create_comprehensive_table("hbissa", weighted = TRUE)
+
+if (nrow(hbissa_results_weighted$hartford_binary) > 0) {
+  hartford_binary_table_weighted <- hbissa_results_weighted$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table_weighted,
+        caption = "HBISSA: Not Enough Available Homes in Budget - Weighted Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+  
+  if (nrow(hbissa_results_weighted$race_binary) > 0) {
+    race_table_weighted <- hbissa_results_weighted$race_binary %>%
+      filter(binary_var == "Agree") %>%
+      select(race_main, pct) %>%
+      pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+    
+    if (ncol(race_table_weighted) > 1) {
+      kable(race_table_weighted,
+            caption = "HBISSA: Not Enough Available Homes by Race/Ethnicity - Weighted (\\% Agree)",
+            booktabs = TRUE) %>%
+        kable_styling(latex_options = c("hold_position"))
+    }
+  }
+} else {
+  cat("Insufficient weighted data for analysis.\n\n")
+}
+```
+
+## HBISSB: Down Payment Barrier
+
+*"The high amount of a down payment keeps me from purchasing a home"*
+
+### Unweighted Analysis
+
+```{r hbissb-analysis}
+hbissb_results <- create_comprehensive_table("hbissb", weighted = FALSE)
+
+if (nrow(hbissb_results$hartford_binary) > 0) {
+  hartford_binary_table <- hbissb_results$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table,
+        caption = "HBISSB: High Down Payment Barrier - Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+}
+```
+
+### Weighted Analysis
+
+```{r hbissb-analysis-weighted}
+hbissb_results_weighted <- create_comprehensive_table("hbissb", weighted = TRUE)
+
+if (nrow(hbissb_results_weighted$hartford_binary) > 0) {
+  hartford_binary_table_weighted <- hbissb_results_weighted$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table_weighted,
+        caption = "HBISSB: High Down Payment Barrier - Weighted Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+}
+```
+
+## HBISSC: Mortgage Rates Too High
+
+*"Mortgage rates are too high for me to purchase a home"*
+
+### Unweighted Analysis
+
+```{r hbissc-analysis}
+hbissc_results <- create_comprehensive_table("hbissc", weighted = FALSE)
+
+if (nrow(hbissc_results$hartford_binary) > 0) {
+  hartford_binary_table <- hbissc_results$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table,
+        caption = "HBISSC: Mortgage Rates Too High - Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+}
+```
+
+### Weighted Analysis
+
+```{r hbissc-analysis-weighted}
+hbissc_results_weighted <- create_comprehensive_table("hbissc", weighted = TRUE)
+
+if (nrow(hbissc_results_weighted$hartford_binary) > 0) {
+  hartford_binary_table_weighted <- hbissc_results_weighted$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table_weighted,
+        caption = "HBISSC: Mortgage Rates Too High - Weighted Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+}
+```
+
+## HBISSD: Credit Issues
+
+*"I would have trouble getting approved for a loan due to credit issues"*
+
+### Unweighted Analysis
+
+```{r hbissd-analysis}
+hbissd_results <- create_comprehensive_table("hbissd", weighted = FALSE)
+
+if (nrow(hbissd_results$hartford_binary) > 0) {
+  hartford_binary_table <- hbissd_results$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table,
+        caption = "HBISSD: Credit Issues Barrier - Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+}
+```
+
+### Weighted Analysis
+
+```{r hbissd-analysis-weighted}
+hbissd_results_weighted <- create_comprehensive_table("hbissd", weighted = TRUE)
+
+if (nrow(hbissd_results_weighted$hartford_binary) > 0) {
+  hartford_binary_table_weighted <- hbissd_results_weighted$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table_weighted,
+        caption = "HBISSD: Credit Issues Barrier - Weighted Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+}
+```
+
+## HBISSE: Knowledge of Home-Buying Resources
+
+*"I know how to find information and resources related to buying a home"*
+
+### Unweighted Analysis
+
+```{r hbisse-analysis}
+hbisse_results <- create_comprehensive_table("hbisse", weighted = FALSE)
+
+if (nrow(hbisse_results$hartford_binary) > 0) {
+  hartford_binary_table <- hbisse_results$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table,
+        caption = "HBISSE: Knowledge of Home-Buying Resources - Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+}
+```
+
+### Weighted Analysis
+
+```{r hbisse-analysis-weighted}
+hbisse_results_weighted <- create_comprehensive_table("hbisse", weighted = TRUE)
+
+if (nrow(hbisse_results_weighted$hartford_binary) > 0) {
+  hartford_binary_table_weighted <- hbisse_results_weighted$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table_weighted,
+        caption = "HBISSE: Knowledge of Home-Buying Resources - Weighted Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+}
+```
+
+## Housing Barriers Summary
+
+### Unweighted Summary
+
+```{r housing-summary}
+housing_vars <- c("hbissa", "hbissb", "hbissc", "hbissd", "hbisse")
+housing_labels <- c(
+  "Not enough homes in budget",
+  "High down payment required", 
+  "Mortgage rates too high",
+  "Credit issues prevent approval",
+  "Know how to find home-buying resources"
+)
+
+housing_summary <- map2_dfr(housing_vars, housing_labels, function(var, label) {
+  sample_size <- df_clean %>%
+    filter(!is.na(!!sym(var)), !!sym(var) != "NA") %>%
+    nrow()
+  
+  if (sample_size > 10) {
+    results <- create_comprehensive_table(var, weighted = FALSE)
+    if (nrow(results$hartford_binary) > 0) {
+      hartford_data <- results$hartford_binary %>%
+        filter(binary_var == "Agree") %>%
+        select(region, pct) %>%
+        pivot_wider(names_from = region, values_from = pct, values_fill = 0)
+      
+      data.frame(
+        Barrier = label,
+        `Sample Size` = sample_size,
+        Hartford = if("Hartford" %in% names(hartford_data)) hartford_data$Hartford else NA,
+        `Other CT` = if("Other CT" %in% names(hartford_data)) hartford_data$`Other CT` else NA,
+        check.names = FALSE
+      )
+    } else {
+      data.frame(
+        Barrier = label,
+        `Sample Size` = sample_size,
+        Hartford = NA,
+        `Other CT` = NA,
+        check.names = FALSE
+      )
+    }
+  } else {
+    data.frame(
+      Barrier = label,
+      `Sample Size` = sample_size,
+      Hartford = NA,
+      `Other CT` = NA,
+      check.names = FALSE
+    )
+  }
+}) %>%
+  filter(!is.na(`Sample Size`))
+
+kable(housing_summary,
+      caption = "Housing Barriers Summary - Percent Agreeing Barrier Exists",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+### Weighted Summary
+
+```{r housing-summary-weighted}
+housing_summary_weighted <- map2_dfr(housing_vars, housing_labels, function(var, label) {
+  sample_size <- df_clean %>%
+    filter(!is.na(!!sym(var)), !!sym(var) != "NA") %>%
+    nrow()
+  
+  if (sample_size > 10) {
+    results <- create_comprehensive_table(var, weighted = TRUE)
+    if (nrow(results$hartford_binary) > 0) {
+      hartford_data <- results$hartford_binary %>%
+        filter(binary_var == "Agree") %>%
+        select(region, pct) %>%
+        pivot_wider(names_from = region, values_from = pct, values_fill = 0)
+      
+      data.frame(
+        Barrier = label,
+        `Sample Size` = sample_size,
+        Hartford = if("Hartford" %in% names(hartford_data)) hartford_data$Hartford else NA,
+        `Other CT` = if("Other CT" %in% names(hartford_data)) hartford_data$`Other CT` else NA,
+        check.names = FALSE
+      )
+    } else {
+      data.frame(
+        Barrier = label,
+        `Sample Size` = sample_size,
+        Hartford = NA,
+        `Other CT` = NA,
+        check.names = FALSE
+      )
+    }
+  } else {
+    data.frame(
+      Barrier = label,
+      `Sample Size` = sample_size,
+      Hartford = NA,
+      `Other CT` = NA,
+      check.names = FALSE
+    )
+  }
+}) %>%
+  filter(!is.na(`Sample Size`))
+
+kable(housing_summary_weighted,
+      caption = "Housing Barriers Summary - Weighted - Percent Agreeing Barrier Exists",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+\newpage
+
+# Maternal Care Analysis
+
+## FCMATC2: Satisfaction with Pregnancy/Delivery Care
+
+*"Were you satisfied with the care you received during your pregnancy or delivery with your youngest child?"*
+
+### Unweighted Analysis
+
+```{r fcmatc2-analysis}
+fcmatc2_results <- create_comprehensive_table("fcmatc2", weighted = FALSE)
+
+# Check sample size
+sample_size_fcmatc2 <- df_clean %>%
+  filter(!is.na(fcmatc2), fcmatc2 != "NA") %>%
+  nrow()
+
+cat(paste("**Sample size:** n =", sample_size_fcmatc2, "\n\n"))
+
+if (nrow(fcmatc2_results$hartford_binary) > 0) {
+  hartford_binary_table <- fcmatc2_results$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table,
+        caption = "FCMATC2: Satisfaction with Pregnancy/Delivery Care - Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+  
+  if (nrow(fcmatc2_results$race_binary) > 0) {
+    race_table <- fcmatc2_results$race_binary %>%
+      filter(binary_var == "Satisfied") %>%
+      select(race_main, pct) %>%
+      pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+    
+    if (ncol(race_table) > 1) {
+      kable(race_table,
+            caption = "FCMATC2: Satisfaction with Care by Race/Ethnicity (\\% Satisfied)",
+            booktabs = TRUE) %>%
+        kable_styling(latex_options = c("hold_position"))
+    }
+  }
+} else {
+  cat("Insufficient data for analysis.\n\n")
+}
+```
+
+### Weighted Analysis
+
+```{r fcmatc2-analysis-weighted}
+fcmatc2_results_weighted <- create_comprehensive_table("fcmatc2", weighted = TRUE)
+
+if (nrow(fcmatc2_results_weighted$hartford_binary) > 0) {
+  hartford_binary_table_weighted <- fcmatc2_results_weighted$hartford_binary %>%
+    select(region, binary_var, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0) %>%
+    rename(Response = binary_var)
+  
+  kable(hartford_binary_table_weighted,
+        caption = "FCMATC2: Satisfaction with Pregnancy/Delivery Care - Weighted Hartford vs Other CT (\\%)",
+        booktabs = TRUE) %>%
+    kable_styling(latex_options = c("hold_position"))
+  
+  if (nrow(fcmatc2_results_weighted$race_binary) > 0) {
+    race_table_weighted <- fcmatc2_results_weighted$race_binary %>%
+      filter(binary_var == "Satisfied") %>%
+      select(race_main, pct) %>%
+      pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+    
+    if (ncol(race_table_weighted) > 1) {
+      kable(race_table_weighted,
+            caption = "FCMATC2: Satisfaction with Care by Race/Ethnicity - Weighted (\\% Satisfied)",
+            booktabs = TRUE) %>%
+        kable_styling(latex_options = c("hold_position"))
+    }
+  }
+} else {
+  cat("Insufficient weighted data for analysis.\n\n")
+}
+```
+
+\newpage
+
+# Child Age Group Analysis
+
+Analysis of households with children in different age ranges.
+
+```{r child-age-analysis}
+# Child age group analysis
+child_age_vars <- c("child_0_5_yrs_e", "child_5_13_yrs_e", "child_11_18_yrs_e", "child_14_17_yrs_e")
+child_age_labels <- c("Ages 0-5", "Ages 5-13", "Ages 11-18", "Ages 14-17")
+
+# Create summary table for child age groups
+child_age_summary <- map2_dfr(child_age_vars, child_age_labels, function(var, label) {
+  
+  # Overall distribution
+  overall <- df_clean %>%
+    filter(!is.na(!!sym(var)), !!sym(var) != "NA") %>%
+    count(!!sym(var)) %>%
+    mutate(pct = round(n / sum(n) * 100, 1))
+  
+  yes_pct <- overall %>% filter(!!sym(var) == "Yes") %>% pull(pct)
+  yes_n <- overall %>% filter(!!sym(var) == "Yes") %>% pull(n)
+  
+  # By region
+  by_region <- df_clean %>%
+    filter(!is.na(!!sym(var)), !!sym(var) != "NA", !is.na(region)) %>%
+    count(region, !!sym(var)) %>%
+    group_by(region) %>%
+    mutate(pct = round(n / sum(n) * 100, 1)) %>%
+    ungroup() %>%
+    filter(!!sym(var) == "Yes") %>%
+    select(region, pct) %>%
+    pivot_wider(names_from = region, values_from = pct, values_fill = 0)
+  
+  # By race
+  by_race <- df_clean %>%
+    filter(!is.na(!!sym(var)), !!sym(var) != "NA", !is.na(race_main)) %>%
+    count(race_main, !!sym(var)) %>%
+    group_by(race_main) %>%
+    mutate(pct = round(n / sum(n) * 100, 1)) %>%
+    ungroup() %>%
+    filter(!!sym(var) == "Yes") %>%
+    select(race_main, pct) %>%
+    pivot_wider(names_from = race_main, values_from = pct, values_fill = 0)
+  
+  data.frame(
+    `Age Group` = label,
+    `Overall %` = yes_pct,
+    `N` = yes_n,
+    Hartford = if("Hartford" %in% names(by_region)) by_region$Hartford else NA,
+    `Other CT` = if("Other CT" %in% names(by_region)) by_region$`Other CT` else NA,
+    White = if("White" %in% names(by_race)) by_race$White else NA,
+    Black = if("Black" %in% names(by_race)) by_race$Black else NA,
+    Latino = if("Latino" %in% names(by_race)) by_race$Latino else NA,
+    check.names = FALSE
+  )
+})
+
+kable(child_age_summary,
+      caption = "Child Age Groups: Percent of Households with Children in Each Age Range",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position")) %>%
+  add_header_above(c(" " = 3, "Hartford vs Other CT" = 2, "Race/Ethnicity" = 3))
+```
+
+\newpage
+
+# Statistical Significance Analysis
+
+## Key Statistical Tests
+
+```{r significance-analysis}
+# Statistical significance summary for parent resilience
+sig_vars <- paste0("fcpr", 1:10)
+sig_labels <- c(
+  "Problem-Solving Strength", "Managing Daily Responsibilities", "Someone to Ask for Help",
+  "Someone to Talk To", "Learning Community Resources", "Persistence with Services",
+  "Ensuring Children Get Attention", "Helping Children Manage Frustration", 
+  "Knowledge of Child Development", "Parenting Impact on Development"
+)
+
+sig_summary <- map2_dfr(sig_vars, sig_labels, function(var, label) {
+  
+  # Calculate Hartford vs Other CT percentages
+  binary_dist <- df_clean %>%
+    filter(!is.na(!!sym(var)), !!sym(var) != "NA", !is.na(region)) %>%
+    mutate(binary_var = create_binary_var(!!sym(var), var)) %>%
+    filter(!is.na(binary_var), binary_var == "Agree") %>%
+    count(region) %>%
+    left_join(
+      df_clean %>%
+        filter(!is.na(!!sym(var)), !!sym(var) != "NA", !is.na(region)) %>%
+        count(region, name = "total"),
+      by = "region"
+    ) %>%
+    mutate(pct = round(n / total * 100, 1))
+  
+  hartford_pct <- binary_dist %>% filter(region == "Hartford") %>% pull(pct)
+  other_pct <- binary_dist %>% filter(region == "Other CT") %>% pull(pct)
+  
+  if (length(hartford_pct) == 0) hartford_pct <- NA
+  if (length(other_pct) == 0) other_pct <- NA
+  
+  diff <- if (!is.na(hartford_pct) && !is.na(other_pct)) hartford_pct - other_pct else NA
+  
+  # Statistical test
+  stat_test <- perform_stat_test(df_clean, var, "region")
+  
+  data.frame(
+    Variable = label,
+    `Hartford pct` = hartford_pct,
+    `Other CT pct` = other_pct,
+    `Difference` = diff,
+    `P-value` = if(!is.null(stat_test)) round(stat_test$p_value, 3) else NA,
+    `Significant` = if(!is.null(stat_test)) ifelse(stat_test$significant, "Yes", "No") else "Unable to test",
+    `Effect Size` = case_when(
+      is.na(diff) ~ "N/A",
+      abs(diff) >= 15 ~ "Large",
+      abs(diff) >= 10 ~ "Moderate", 
+      abs(diff) >= 5 ~ "Small",
+      TRUE ~ "Minimal"
+    ),
+    check.names = FALSE
+  )
+})
+
+kable(sig_summary,
+      caption = "Statistical Significance Summary - Hartford vs Other CT",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position")) %>%
+  footnote(general = c("Effect Size: Large (15 or more pts), Moderate (10-14 pts), Small (5-9 pts), Minimal (under 5 pts)",
+                    "Differences of 10 or more percentage points typically indicate meaningful disparities"),
+         threeparttable = TRUE)
+```
+
+## Race/Ethnicity Disparities
+
+```{r race-disparities}
+# Calculate largest race/ethnicity disparities
+race_disparities <- map2_dfr(sig_vars[1:5], sig_labels[1:5], function(var, label) {
+  
+  race_dist <- df_clean %>%
+    filter(!is.na(!!sym(var)), !!sym(var) != "NA", !is.na(race_main)) %>%
+    mutate(binary_var = create_binary_var(!!sym(var), var)) %>%
+    filter(!is.na(binary_var), binary_var == "Agree") %>%
+    count(race_main) %>%
+    left_join(
+      df_clean %>%
+        filter(!is.na(!!sym(var)), !!sym(var) != "NA", !is.na(race_main)) %>%
+        count(race_main, name = "total"),
+      by = "race_main"
+    ) %>%
+    mutate(pct = round(n / total * 100, 1))
+  
+  white_pct <- race_dist %>% filter(race_main == "White") %>% pull(pct)
+  black_pct <- race_dist %>% filter(race_main == "Black") %>% pull(pct)
+  latino_pct <- race_dist %>% filter(race_main == "Latino") %>% pull(pct)
+  
+  if (length(white_pct) == 0) white_pct <- NA
+  if (length(black_pct) == 0) black_pct <- NA
+  if (length(latino_pct) == 0) latino_pct <- NA
+  
+  data.frame(
+    Variable = label,
+    White = white_pct,
+    Black = black_pct,
+    Latino = latino_pct,
+    `Max Difference` = if (all(!is.na(c(white_pct, black_pct, latino_pct)))) {
+      max(c(white_pct, black_pct, latino_pct)) - min(c(white_pct, black_pct, latino_pct))
+    } else NA,
+    check.names = FALSE
+  )
+})
+
+kable(race_disparities,
+      caption = "Race/Ethnicity Disparities in Parent Resilience (\\% Agree)",
+      booktabs = TRUE) %>%
+  kable_styling(latex_options = c("hold_position"))
+```
+
+\newpage
+
+# Conclusions and Recommendations
+
+## Major Findings
+
+### 1. Hartford Disparities
+Hartford caregivers consistently report lower resilience across multiple domains compared to other Connecticut areas. The most significant gaps appear in:
+- Problem-solving confidence (FCPR1)
+- Social support availability (FCPR3, FCPR4)
+- Managing daily responsibilities (FCPR2)
+
+### 2. Race/Ethnicity Patterns
+- White caregivers generally report highest resilience scores
+- Black and Latino caregivers show varying patterns across different resilience domains
+- Largest disparities appear in social support and resource access measures
+
+### 3. Income-Related Differences  
+- Higher-income caregivers report greater resilience across most measures
+- Income differences compound with geographic and racial disparities
+- Housing barriers affect primarily lower-income potential homebuyers
+
+### 4. Statistical Reliability
+- Sample sizes support reliable comparisons for major demographic groups
+- Effect sizes indicate meaningful differences beyond statistical significance
+- Housing barrier analyses limited by small sample sizes and should be interpreted cautiously
+
+### 5. Weighted vs Unweighted Results
+- Weighted analysis accounts for differential response rates across demographic groups
+- Both weighted and unweighted analyses show similar overall patterns
+- Weighted results may provide more accurate population-level estimates
+
+## Implications for Programs and Policy
+
+### Immediate Priorities
+1. **Strengthen social support networks** in Hartford communities
+2. **Address housing affordability** through policy and assistance programs
+3. **Develop culturally responsive** parenting support programs
+4. **Build parental confidence** through skill-building interventions
+
+### Long-term Strategies  
+1. **Systemic approaches** to address underlying causes of disparities
+2. **Cross-sector collaboration** between health, housing, and family services
+3. **Community-led solutions** that build on existing strengths
+4. **Continued monitoring** of these indicators to track progress
+
+## Recommendations for Future DataHaven Surveys
+
+### Variables to Continue
+- **Parent resilience measures (FCPR1-FCPR10)** - demonstrate clear demographic disparities
+- **Basic demographic comparisons** - Hartford vs other areas, race/ethnicity, income
+- **Child age group distributions** - useful for program planning
+
+### Variables to Modify
+- **Expand housing barrier questions** to larger eligible population
+- **Add confidence intervals** for key comparisons
+- **Include follow-up questions** on specific support needs
+
+### Methodological Improvements
+- **Maintain consistent response category ordering** across surveys
+- **Ensure adequate sample sizes** for reliable subgroup analysis
+- **Consider mixed-mode data collection** to improve response rates
+- **Present both weighted and unweighted results** for transparency and completeness
+
+---
+
+**Analysis Notes:** This analysis presents both unweighted and weighted data from the DataHaven 2024 pilot study. Sample: `r nrow(df_clean)` caregivers who completed the extended family module. Statistical tests performed using chi-square tests for binary comparisons where appropriate. Effect sizes calculated as percentage point differences between groups. Weighted analysis uses survey weights to adjust for differential response rates across demographic groups.

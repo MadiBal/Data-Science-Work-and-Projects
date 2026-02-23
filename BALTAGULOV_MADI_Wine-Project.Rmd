@@ -1,0 +1,530 @@
+---
+title: "Final Project"
+author: "MADI BALTAGULOV"
+date: "2023-04-07"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Data
+
+
+
+```{r cars , echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+library(tidyverse); library(cluster);
+library(factoextra); library(NbClust);
+library(aricode); library(ggplot2);
+ library(psych); library(GPArotation)
+#loading data
+data <- read.csv("../downloads/winequality-red.csv")
+#learning how the data looks
+dim(data)
+class(data)
+typeof(data)
+colnames(data)
+
+```
+
+The Winequailty-Red dataset was obtained through the https://www.kaggle.com/datasets/uciml/red-wine-quality-cortez-et-al-2009. The dataset contains observations of various Portuguese red wines, which constitute 1599 rows of data, each from a unique wine bottle. They include 12 variables illustrated above, including 11 continuous numeric variables such as citric acid content, sugar content, alcohol content, and etc. "quality" is a variable representing peoples' evalation of the wine. The data was collected to elucidate the potential connections between listed varaibles and the perceived quality of the wine. A total of 19'188 data units are contained in the dataset. The dataset is referenced by an academic paper : P. Cortez, A. Cerdeira, F. Almeida, T. Matos and J. Reis. Modeling wine preferences by data mining from physicochemical properties. In Decision Support Systems, Elsevier, 47(4):547-553, 2009. 
+
+## Research Question
+
+Using this data set, I will attempt to identify:
+1)Is there meaningful clustering among the variables `fixed.acidity`,`volatile.acidity` `citric.acid`,`residual.sugar`, `chlorides` `free.sulfur.dioxide`,`total.sulfur.dioxide`, `pH`, `sulphates`, `alcohol` ?
+Null Hypothesis: the variables have no relation to each other, therefore do not produce clusters. 
+Alternative Hypothesis: at least some of the variables have a significant relation to each other, producing at least 2 clusters.
+
+2)Can the quality score of the wine `quality` be predicted by all other variables, representing the wine's chemical composition?
+Null Hypothesis: the quality rating  no relation to any of the variables listed above. 
+Alternative Hypothesis:the quality rating has a significant relation to at least one other variable in the data set.
+
+Note: If the `quality` variable is predicted, we will conduct further testing of the model.
+
+## Variables of Interest
+
+`fixed.acidity`,`volatile.acidity` `citric.acid`,`residual.sugar`, `chlorides` `free.sulfur.dioxide`,`total.sulfur.dioxide`, `pH`, `sulphates`, `alcohol`, and  `quality` are variables of interest:
+
+  'fixed.acidity'- tartaric acid content in g/dm^3.
+  
+  'volatile.acidity'- acetic acid content in g/dm^3.
+  
+  'citric.acid','residual.sugar', 'chlorides', 'sulphates' - similar to variables above.
+  
+  'free.sulfur.dioxide','total.sulfur.dioxide'- similar to variables above, but measured in mg/dm^3.
+  
+  'pH'- a logarithmic value corresponding to the relative acidity, with lower values representing higher acidity.
+  
+  'alcohol' - % alcohol by volume.
+  
+  'quality' - the rating of the wine on a scale 0-10.
+  
+  
+## Data Wrangling
+
+``` {r data, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+#first, we need to remove columns we won't use
+data_sample <- data %>%
+  select(fixed.acidity, volatile.acidity, citric.acid, residual.sugar, chlorides, free.sulfur.dioxide, total.sulfur.dioxide, pH, sulphates, alcohol, quality)
+colnames(data_sample)
+#the large amount of observations is actually beneficial for clustering
+dim(data_sample)
+#cleaning potential NA observations
+data_sample<-na.omit(data_sample)
+
+
+#let us deselect our outcome variable 'quality' for clustering
+data_sample_kmeans<- data_sample %>%
+  select(-quality)
+
+```
+There wasn't much data wrangling necessary, as the data set is relatively clean. Mostly numeric variables remain. Seems like there are no empty values. Variable 'density' was intentionally left out, since its observations are on the scale of 0.99 to 1, which makes its scale too narrow compared to other variables.
+
+``` {r data 2, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+# Set seed
+set.seed(1234)
+
+data_kmeans <- kmeans(
+  x = data_sample_kmeans, #numeric data
+  centers = 10, #number of clusters based on number of variables
+  iter.max = 10,  #number of maximum iterations
+  nstart = 25 #number of random starting values
+)
+ # Within-cluster sum of squares
+data_kmeans$withinss
+ # Variance explained
+data_kmeans$betweenss /  # between sum of squares
+data_kmeans$totss  # total sum of squares
+# Cluster frequencies
+table(data_kmeans$cluster)
+# Cluster centroids
+round(data_kmeans$centers)
+#I have used the Lab 9 script to guide this code
+
+```
+Variance explained of 0.9318432 is pretty close to 1, so it is pretty good.
+
+
+## PCA and previewing correlation between variables
+
+``` {r preview, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+# View correlation matrix
+
+# Custom function
+setup_ggplot2_heatmap <- function(
+    correlation_matrix, # input for correlation matrix
+    type = c("full", "lower", "upper")
+    # whether matrix should depict the full, lower,
+    # or upper matrix
+)
+{
+  #obtain matrix
+  # Ensure correlation matrix is a `matrix` object
+  corr_mat <- as.matrix(correlation_matrix)
+  
+  # Determine triangle
+  if(type == "lower"){
+    corr_mat[upper.tri(corr_mat)] <- NA
+  }else if(type == "upper"){
+    corr_mat[lower.tri(corr_mat)] <- NA
+  }
+  
+  # Convert to long format
+  corr_df <- data.frame(
+    Var1 = rep(colnames(corr_mat), each = ncol(corr_mat)),
+    Var2 = rep(colnames(corr_mat), times = ncol(corr_mat)),
+    Correlation = as.vector(corr_mat)
+  )
+  
+  # Set levels
+  corr_df$Var1 <- factor(
+    corr_df$Var1, levels = colnames(corr_mat)
+  )
+  corr_df$Var2 <- factor(
+    corr_df$Var2, levels = rev(colnames(corr_mat))
+  )
+  corr_df$Correlation <- as.numeric(corr_df$Correlation)
+  
+  # Return data frame for plotting
+  return(corr_df)
+  
+}
+
+# Obtain full matrix
+data_lower <- setup_ggplot2_heatmap(
+  cor(data_sample), type = "full"
+)
+
+# Plot correlation matrix
+ggplot(
+  data = data_lower,
+  aes(x = Var1, y = Var2, fill = Correlation)
+) +
+  geom_tile(color = "black") +
+  scale_fill_gradient2(
+    low = "#CD533B", mid = "#EAEBED",
+    high = "#588B8B", limits = c(-1, 1),
+    guide = guide_colorbar(
+      frame.colour = "black",
+      ticks.colour = "black"
+    )
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.title = element_blank(),
+    plot.title = element_text(size = 14, hjust = 0.5)
+  ) +
+  labs(title = "Wine Qualities")
+#This code is partially sourced from the in-class dimensiion-reduction script
+```  
+We can see some strong positive correlation between the sulfide variables, as well as between citric acid content and acidity variables. There is also a strong negative correlation between pH and acidity variables, which makes sense given the inverse nature of the pH variable.
+
+``` {r analysis 2, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+# Load {factoextra}
+library(factoextra)
+
+# Obtain three principal components
+components <- kmeans(
+  x = t(as.matrix(data_sample_kmeans)),
+  centers = 3
+)
+
+# Visualize
+fviz_cluster(
+  components,
+  data = t(as.matrix(data_sample_kmeans))
+) +
+  geom_vline(xintercept = 0) +
+  geom_hline(yintercept = 0) +
+  scale_x_continuous(
+    limits = c(-300, 300),
+    breaks = seq(-300, 300, 100)
+  ) +
+  scale_y_continuous(
+    limits = c(-100, 100),
+    breaks = seq(-100, 100, 50)
+  ) +
+  theme(
+    plot.title = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(linewidth = 1),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    legend.position = "none"
+  )
+#This code is sourced from the dimension_reduction script.
+``` 
+
+This suggest that there could be at least 3 principal components in or data, yet the varaibles 'alcohol' and 'fixed.acidity' explain the most of the data.
+
+``` {r analysis 3, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+# Obtain correlations
+correlations <- cor(data_sample_kmeans)
+
+# Determine which variables are greater than 0.90
+greater_than <- which(correlations >= 0.90, arr.ind = TRUE)
+
+# Duplicate relationships happen because of symmetric matrix
+# Also removes diagonal which equals 1
+greater_than <- greater_than[
+  greater_than[,"row"] < greater_than[,"col"],
+]
+
+# Replace indices with actual names
+greater_than[,"row"] <- colnames(data_sample_kmeans)[
+  greater_than[,"row"]
+]
+greater_than[,"col"] <- colnames(data_sample_kmeans)[
+  as.numeric(greater_than[,"col"])
+]
+
+# Remove names for ease of interpretation
+unname(greater_than)
+# Remove one variable from each multicolinear pair
+data_unique <- data_sample_kmeans %>%
+  select(
+    -volatile.acidity
+  )
+#Part of this code is sourced from the dimension_reduction script.
+``` 
+
+Correlation analyses suggests that fixed.acidity and volatile.acidity are multicolinear, so I decided to remove volatile.acidity.
+
+``` {r analysis 4, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+# Perform PCA
+data_pca <- prcomp(data_unique, center = TRUE, scale. = TRUE)
+
+# Obtain summary
+summary(data_pca)
+
+# Load {factorextra}
+library(factoextra)
+
+# Produce 2-dimensional plot
+fviz_pca_var(
+  data_pca,
+  col.var = "contrib", # Color by contributions to the PCA
+  gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+  repel = TRUE #Avoid overlapping text if possible 
+  
+)
+# Biplot
+fviz_pca_biplot(
+  data_pca, repel = TRUE,
+  col.var = "#FC4E07", # Variables color
+  col.ind = "#00AFBB",  # Individuals color
+  label = "var" # Variables only
+)
+#Part of this code is sourced from the dimension_reduction script.
+``` 
+
+PCA summary suggests that the majority of variation can be explained with three principal component. Plots suggest that 'alcohol' is a very weak contributor to the variation.
+
+``` {r analysis 5, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+#Bartlett's test
+cortest.bartlett(data_unique)
+#KMO test
+KMO(data_unique)
+``` 
+
+Bartlett's test returns a p-value of 0, which is lower than 0.05. This suggests that the variances between the variables are significantly different. The KMO test's MSA value is around 0.6, which is mediocre. We will try to improve it by removing variables with low MSA values.
+
+``` {r analysis 6, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+KMO_data_pca <- data_unique[, c(1,2,3,4,5,7,8)]
+KMO(KMO_data_pca)
+``` 
+The MSA value is maximized at 0.66 with those 7 variable. Any further elimination lowers MSA.
+
+``` {r PCA1, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+# PCA with {psych}
+initial_pca <- principal(data_unique, nfactors = ncol(data_unique), rotate = "oblimin")
+
+# Plot
+plot(initial_pca$values, type = "b", ylab = "Eigenvalues"); abline(h = 1);
+
+# PCA with {psych}
+parallel_pca <- fa.parallel(
+  x = data_unique, fa = "pc",
+  sim = FALSE # ensures resampling
+)
+
+# PCA with {psych}
+final_pca <- principal(
+  r = data_unique, nfactors = 7,
+  rotate = "oblimin", # Correlated dimensions
+  residuals = TRUE # Obtain residuals
+)
+#This code is sourced from the dimension_reduction script.
+``` 
+
+The parallel PCA Scree plots and parallel analysis suggest that the variables can be reduced to 4 principal components that are necessary to effectively describe the data.
+
+``` {r PCA2, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+# Shapiro-Wilk
+shapiro.test(final_pca$residual)
+
+# Histogram
+hist(final_pca$residual)
+
+# Check loadings
+loadings <- round(final_pca$loadings[,1:4], 3)
+
+# For interpretation, set less than 0.30 to ""
+loadings[loadings < 0.30] <- ""
+
+# Print loadings
+as.data.frame(loadings)
+#Part of this code is sourced from the dimension_reduction script.
+``` 
+
+The Shapiro-Wilk test returns a low p-value, suggesting that the residuals of our pca are not normally distributed. The histogram of residuals actually looks fairly normal except a small tail on the right. The loadings tail helps us understand what variables belong to which TC components.
+
+## Analysis + transforming our data with the new PCs
+
+
+``` {r analysis 8, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+#Our final pca analysis to check if 4 PCs are sufficient
+pca_final <- principal(KMO_data_pca, nfactors = 4, rotate = "promax")
+pca_final
+#visualizing how the variables are grouped into respective components
+fa.diagram(pca_final)
+# have used ChatGPT to aid the production of the code used in this problem
+#I used to find how to figure out the way my variables are grouped
+
+``` 
+
+Our analysis suggests that 4 principal components are sufficient.
+
+``` {r analysis 9, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+# Obtain scores
+pca_scores <- as.data.frame(pca_final$scores)
+#Rename the components according to what they describe
+final_data <- pca_scores %>%
+  rename(acidity = RC1) %>%
+    rename(sulfur = RC2) %>%
+      rename(chlorides = RC3) %>%
+        rename(sugar = RC4)
+#Let's return our 'quality' variable
+final_data <- final_data %>%
+  mutate(quality = data_sample$quality) 
+#Now let's check how the final data frame looks
+cor(final_data)
+``` 
+
+
+
+## Creating a linear model 
+
+
+``` {r lines, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+#creating a linear model to predict wine quality
+linear_data <- lm(quality~ acidity + sulfur + chlorides + sugar, final_data) 
+#check the model outputs
+summary(linear_data)
+ 
+```
+
+The variable 'sugar' has a p-value above 0.05, which means it is not a significant contributor when it comes to predicting 'quality'. We will remove it.
+
+
+``` {r histogram, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+#revised linear model
+linear_data_2<- lm(quality ~ acidity + sulfur+ chlorides, final_data)
+summary(linear_data_2)
+``` 
+
+ Now all the variables are significant predictors of'quality.
+ 
+## Checking linear model assumptions
+ 
+ 
+
+``` {r histogram 2, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+#Let's check if the components are mutlicolinear in the new model
+car::vif(linear_data_2)
+``` 
+
+All the VIF coefficients are below 5, which means that our new PCs are not multicolinear with each other.
+
+
+
+``` {r fixing 4, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+#check normality of residuals
+shapiro.test(residuals(linear_data_2))
+``` 
+
+The p-value is very low, which again suggests that the residuals of the model are not normally distributed.
+
+``` {r fixing 5, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+#check the normality of residuals via Q-Q plot
+plot(linear_data_2, which = 2)
+``` 
+
+The Q-Q plot actually suggets that most residuals are normally distributed, with a few low theoretical quantile values trailing off the normal line.
+
+``` {r fixing 6, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+#genereate the residuals vs fitted values plot
+plot(linear_data_2, which = 1)
+``` 
+
+Residuals vs fitted values plot looks odd, with observations grouping into slanted streaks of data. This may suggest that the assumption of homoskedasticity is not met for the linear model, yet I am not sure what variables are heteroskedastic. The logistic model would not be appropriate in our cases, since all of are variables are continuous numeric variables.
+
+``` {r fixing 7, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+#the root mean-square value of the model
+sqrt(mean(residuals(linear_data_2)^2))
+``` 
+
+The RMSE is at 0.775, which means that our predicted 'quality' values are roughly 0.775 points away from the actual 'quality' value.
+
+
+## Cross-validating the model
+
+
+``` {r fixing 8, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+library(caret)
+# Set seed
+set.seed(1234)
+
+# Using {caret}, set up cross-validation
+training <- trainControl(
+  method = "cv", # define method
+  number = 10 # number of folds
+)
+# Define model
+
+lm_cv10 <- train(
+  quality ~ .,
+  data = final_data,
+  method = "lm", # linear regression
+  trControl = training
+  # Control over training
+)
+
+# Print summary
+summary(lm_cv10)
+# Obtain relative importance
+varImp(lm_cv10)$importance
+#This code has been partially sourced from the in-class generalizability script.
+``` 
+
+'Sugar' component is not a significant predictor of wine 'quality'. 
+
+``` {r fixing 9, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+# Set seed
+set.seed(1234)
+
+# Using {caret}, set up cross-validation
+training <- trainControl(
+  method = "cv", # define method
+  number = 10 # number of folds
+)
+# Define model
+lm_cv10_final <- train(
+  #pick only significant predictors
+  quality ~ acidity+chlorides+sulfur,
+  data = final_data,
+  method = "lm", # linear regression
+  trControl = training
+  # Control over training
+)
+
+# Print summary
+summary(lm_cv10_final)
+# Obtain relative importance
+varImp(lm_cv10_final)$importance
+#This code has been partially sourced from the in-class generalizability script.
+``` 
+
+Now all components are significant predictors.
+
+``` {r fixing 11, echo=TRUE  , eval = TRUE  ,  comment=NA , message=FALSE , warning=FALSE }
+
+#the root mean-square value of the model
+sqrt(mean(residuals(lm_cv10_final)^2))
+``` 
+
+The RMSE is still at 0.775, which means that our predicted 'quality' values are roughly 0.775 points away from the actual 'quality' value.
+
+## DISCUSSION
+
+  It seems pretty clear that wine quality rating can be predicted with at least 3 components sourced from our variables. 'fixed.acidity', 'citric.acid', and 'pH' are all metrics of acidity, so it makes sense that they make up one component. 'chlorides' and 'total.sulfur.dioxide' make up the two remaining components. It makes sense that sulfur dioxide content would be a separate component, since many wine experts considers sulfur content to influence the "earthiness" of the wine. Chlorides may contribute to the "minerality" of the wine's flavor, which can be roughly described as the difference between a drink with either many or few electrolytes.
+  We can reject the  first null hypothesis, since we effectivly reduced the initial 10 descriptive variables to 3 principal components.
+  The linear model built with our principal components suggests has been cross-validated at 10 folds. All the model summaries suggets that our 3 principal components are significant predictors of wine 'quality'. Our predicted 'quality' values are on average 0.775 units away from the real 'quality' value, which is pretty decent, given that the 'quality' variable is on the range 0-10. Nevertheless, the homoskedasticity assumption and the normal distribution assumptions are not entirely met. This partially compromises our linear model, so I cannot definitively conclude that there is a strictly linear relationship betwenn wine 'quality' and other variables. 
+  We do not reject the second null hypothesis, since even though there are significant linear predictors of 'quality' among our variables, not every assumption has been met to prove the appropriateness of the linear model.
+  To decisively elucidate the linear relationship between our variables, I would need to learn how to fix the heteroskedacity within our principal components, as well as figure out why the Shapiro-Wilk test, the Q-Q plot, and the histogram of residuals suggest somewhat different conclusion about normality of our residuals.
+  A lot of this code was made by reusing parts of  in-class scripts on dimension reduction and generalizability.
+
+
+

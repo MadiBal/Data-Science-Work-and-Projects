@@ -1,0 +1,343 @@
+---
+title: "MGT556-Final Project"
+author: "Madi Baltagulov"
+date: "2025-11-25"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load}
+library(dplyr)
+library(caret)
+library(fastDummies)
+
+# Load data
+df <- read.csv("/Users/madibaltagulov/Downloads/restaurant_customer_satisfaction.csv")
+
+# Convert outcome to factor
+df$HighSatisfaction <- as.factor(df$HighSatisfaction)
+
+# Identify categorical variables
+cat_vars <- c("Gender", "VisitFrequency", "PreferredCuisine", "TimeOfVisit",
+              "DiningOccasion", "MealType")
+
+# One-hot encoding (drop first to avoid multicollinearity)
+df_model <- dummy_cols(df, select_columns = cat_vars, 
+                       remove_selected_columns = TRUE, 
+                       remove_first_dummy = TRUE)
+
+# Train/test split
+set.seed(123)
+train_idx <- createDataPartition(df_model$HighSatisfaction, p = 0.8, list = FALSE)
+train <- df_model[train_idx, ]
+test  <- df_model[-train_idx, ]
+
+```
+
+```{r randomforest}
+library(randomForest)
+
+# Compute class weights (inverse frequency)
+w1 <- sum(train$HighSatisfaction == 0) / sum(train$HighSatisfaction == 1)
+class_wts <- c("0" = 1, "1" = w1)
+
+# Fit Random Forest
+set.seed(123)
+rf_model <- randomForest(
+  HighSatisfaction ~ .,
+  data = train,
+  importance = TRUE,
+  ntree = 500,
+  classwt = class_wts
+)
+
+# Variable Importance Plot
+varImpPlot(rf_model)
+rf_importance <- importance(rf_model)
+print(rf_importance)
+
+```
+
+```{r XGBoost}
+library(dplyr)
+library(xgboost)
+
+# 1. Ensure labels are 0/1
+train$HighSatisfaction <- factor(train$HighSatisfaction, levels = c(0, 1))
+test$HighSatisfaction  <- factor(test$HighSatisfaction,  levels = c(0, 1))
+
+train_y <- as.integer(train$HighSatisfaction) - 1  # -> 0/1
+test_y  <- as.integer(test$HighSatisfaction)  - 1
+
+# 2. Build feature matrices
+train_x <- data.matrix(dplyr::select(train, -HighSatisfaction))
+test_x  <- data.matrix(dplyr::select(test,  -HighSatisfaction))
+
+# 3. Handle imbalance
+neg <- sum(train_y == 0)
+pos <- sum(train_y == 1)
+scale <- neg / pos    # scale_pos_weight
+
+# 4. Train XGBoost
+xgb_model <- xgboost(
+  data = train_x,
+  label = train_y,
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  nrounds = 300,
+  max_depth = 6,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  scale_pos_weight = scale,
+  verbose = 1
+)
+
+# 5. Importance
+importance <- xgb.importance(model = xgb_model)
+print(importance)
+xgb.plot.importance(importance)
+
+
+
+```
+
+```{r logistic regression}
+# Class weights to balance outcome
+w1 <- sum(train$HighSatisfaction == 0) / sum(train$HighSatisfaction == 1)
+weights_vec <- ifelse(train$HighSatisfaction == 1, w1, 1)
+
+logit_model <- glm(
+  HighSatisfaction ~ .,
+  data = train,
+  family = binomial,
+  weights = weights_vec
+)
+
+summary(logit_model)
+exp(cbind(OR = coef(logit_model), confint(logit_model)))
+
+```
+
+```{r plot}
+###############################
+# Comparison of Feature Importance
+# Random Forest vs XGBoost vs Logistic Regression
+###############################
+
+# ================
+# Load packages
+# ================
+library(readr)
+library(dplyr)
+library(fastDummies)
+library(randomForest)
+library(xgboost)
+library(ggplot2)
+library(gridExtra)
+library(broom)
+library(tibble)
+library(grid)
+
+# ================
+# Load and prepare data
+# ================
+df <- read.csv("/Users/madibaltagulov/Downloads/restaurant_customer_satisfaction.csv")
+
+# Drop CustomerID as requested
+df <- df %>% select(-CustomerID)
+
+# Categorical variables to dummy
+cat_vars <- c("Gender",
+              "VisitFrequency",
+              "PreferredCuisine",
+              "TimeOfVisit",
+              "DiningOccasion",
+              "MealType")
+
+# One-hot encode (drop first level of each to avoid multicollinearity)
+df_model <- df %>%
+  fastDummies::dummy_cols(select_columns = cat_vars,
+                          remove_first_dummy = TRUE,
+                          remove_selected_columns = TRUE)
+
+# Make outcome a factor for RF and logistic
+df_model$HighSatisfaction <- factor(df_model$HighSatisfaction, levels = c(0, 1))
+
+# ================
+# Train–test split
+# ================
+set.seed(123)
+n <- nrow(df_model)
+train_idx <- sample(seq_len(n), size = 0.8 * n)
+train <- df_model[train_idx, ]
+test  <- df_model[-train_idx, ]
+
+# Matrix / labels for XGBoost
+x_train_mat <- as.matrix(select(train, -HighSatisfaction))
+y_train_fac <- train$HighSatisfaction
+y_train_xgb <- as.integer(y_train_fac) - 1  # -> 0/1 numeric labels
+
+# ================
+# Class imbalance weights
+# ================
+w1 <- sum(y_train_fac == "0") / sum(y_train_fac == "1")  # weight for class 1
+weights_vec <- ifelse(y_train_fac == "1", w1, 1)
+
+# For XGBoost
+scale_pos <- sum(y_train_xgb == 0) / sum(y_train_xgb == 1)
+
+# ================
+# 1) Random Forest
+# ================
+set.seed(123)
+rf <- randomForest(
+  HighSatisfaction ~ .,
+  data = train,
+  ntree = 500,
+  importance = TRUE,
+  classwt = c("0" = 1, "1" = w1)
+)
+
+rf_imp_mat <- importance(rf, type = 2)  # MeanDecreaseGini
+rf_imp_df <- data.frame(
+  Feature    = rownames(rf_imp_mat),
+  Importance = rf_imp_mat[, "MeanDecreaseGini"],
+  row.names  = NULL
+) %>%
+  arrange(desc(Importance)) %>%
+  head(8)
+
+# ================
+# 2) XGBoost
+# ================
+xgb_train <- xgb.DMatrix(data = x_train_mat, label = y_train_xgb)
+
+set.seed(123)
+xgb_model <- xgboost(
+  data = xgb_train,
+  objective = "binary:logistic",
+  eval_metric = "logloss",
+  nrounds = 300,
+  max_depth = 6,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  scale_pos_weight = scale_pos,
+  verbose = 0
+)
+
+xgb_imp_raw <- xgb.importance(
+  feature_names = colnames(x_train_mat),
+  model         = xgb_model
+)
+
+xgb_imp <- as_tibble(xgb_imp_raw) %>%
+  arrange(desc(Gain)) %>%
+  head(8) %>%
+  transmute(
+    Feature    = Feature,
+    Importance = Gain
+  )
+
+# ================
+# 3) Logistic Regression
+# ================
+logit <- glm(
+  HighSatisfaction ~ .,
+  data    = train,
+  family  = binomial,
+  weights = weights_vec
+)
+
+logit_imp <- broom::tidy(logit) %>%
+  as_tibble() %>%
+  filter(term != "(Intercept)") %>%
+  mutate(Importance = abs(estimate)) %>%
+  arrange(desc(Importance)) %>%
+  head(8) %>%
+  select(Feature = term, Importance)
+
+# ================
+# Build ggplots (presentation style)
+# ================
+theme_present <- theme_minimal(base_size = 14) +
+  theme(
+    plot.title   = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title.x = element_text(size = 12),
+    axis.text    = element_text(size = 10)
+  )
+
+p_rf <- ggplot(rf_imp_df,
+               aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Random Forest\nFeature Importance",
+    x = "Mean Decrease Gini",
+    y = NULL
+  ) +
+  theme_present
+
+p_xgb <- ggplot(xgb_imp,
+                aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "XGBoost\nFeature Importance (Gain)",
+    x = "Gain",
+    y = NULL
+  ) +
+  theme_present
+
+p_log <- ggplot(logit_imp,
+                aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Logistic Regression\n|Coefficient|",
+    x = "Absolute Coefficient",
+    y = NULL
+  ) +
+  theme_present
+
+# ================
+# Composite figure
+# ================
+grid <- gridExtra::grid.arrange(
+  p_rf, p_xgb, p_log,
+  nrow = 1,
+  top = textGrob(
+    "Comparison of Feature Importance Across Models",
+    gp = gpar(fontsize = 18, fontface = "bold")
+  )
+)
+
+# ================
+# Save to file (PNG)
+# ================
+ggsave(
+  filename = "model_comparison_feature_importance.png",
+  plot     = grid,
+  width    = 14,
+  height   = 5,
+  dpi      = 300
+)
+
+# (Optional) Save as PDF instead:
+# ggsave(
+#   filename = "model_comparison_feature_importance.pdf",
+#   plot     = grid,
+#   width    = 14,
+#   height   = 5
+# )
+
+###############################
+# End of script
+###############################
+
+```
+

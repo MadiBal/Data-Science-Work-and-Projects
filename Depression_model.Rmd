@@ -1,0 +1,584 @@
+
+```{r}
+# Load required libraries
+library(tidyverse)
+
+# Read the data
+data <- read_csv("corrected_filtered_nature_health_data.csv")
+
+# Take a look at the data first
+glimpse(data)
+summary(data)
+
+# Check key variables
+cat("Tree canopy range:", range(data$canopy_pct_of_land, na.rm = TRUE), "\n")
+cat("q23a values:", unique(data$q23a), "\n")
+cat("q23c values:", unique(data$q23c), "\n") 
+cat("q11 values:", unique(data$q11), "\n")
+cat("q4g values:", unique(data$q4g), "\n")
+
+# Process the data
+processed_data <- data %>%
+  mutate(
+    # Change tree canopy into deciles (0-0.1, 0.1-0.2, etc.)
+    canopy_decile = cut(canopy_pct_of_land, 
+                       breaks = seq(0, 1, 0.1), 
+                       labels = c("0-0.1", "0.1-0.2", "0.2-0.3", "0.3-0.4", "0.4-0.5", 
+                                 "0.5-0.6", "0.6-0.7", "0.7-0.8", "0.8-0.9", "0.9-1.0"),
+                       include.lowest = TRUE),
+    
+    # Change park access and park quality variables to binary (assuming q23a and q23c are park-related)
+    park_access = ifelse(q23a == "Yes", 1, 0),
+    park_quality = ifelse(q23c == "Yes", 1, 0),
+    
+    # Group homeowners with people who live with homeowner friends/family
+    housing_status = case_when(
+      q11 == "I own my home" ~ "Homeowner",
+      q11 == "I live with family or friends who own" ~ "Homeowner",
+      TRUE ~ "Non-homeowner"
+    ),
+    
+    # Binarize self-rated health (q4g)
+    good_health = ifelse(q4g %in% c("Excellent", "Good"), 1, 0)
+  )
+
+# Check the transformations
+cat("\nCanopy decile distribution:\n")
+table(processed_data$canopy_decile, useNA = "always")
+
+cat("\nPark access distribution:\n")
+table(processed_data$park_access, useNA = "always")
+
+cat("\nPark quality distribution:\n")
+table(processed_data$park_quality, useNA = "always")
+
+cat("\nHousing status distribution:\n")
+table(processed_data$housing_status, useNA = "always")
+
+cat("\nHealth status distribution:\n")
+table(processed_data$good_health, useNA = "always")
+
+# Display first few rows of processed data
+head(processed_data[, c("canopy_pct_of_land", "canopy_decile", "q23a", "park_access", 
+                        "q23c", "park_quality", "q11", "housing_status", "q4g", "good_health")])
+```
+
+
+
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(broom)
+library(survey)
+library(car)
+library(MASS)
+
+# Read and process the data (assuming previous processing code was run)
+data <- read_csv("corrected_filtered_nature_health_data.csv")
+
+processed_data <- data %>%
+  mutate(
+    # Tree canopy deciles
+    canopy_decile = cut(canopy_pct_of_land, 
+                       breaks = seq(0, 1, 0.1), 
+                       labels = c("0-0.1", "0.1-0.2", "0.2-0.3", "0.3-0.4", "0.4-0.5", 
+                                 "0.5-0.6", "0.6-0.7", "0.7-0.8", "0.8-0.9", "0.9-1.0"),
+                       include.lowest = TRUE),
+    
+    # Park variables to binary
+    park_access = ifelse(q23a == "Yes", 1, 0),
+    park_quality = ifelse(q23c == "Yes", 1, 0),
+    
+    # Housing status grouping
+    housing_status = case_when(
+      q11 == "I own my home" ~ "Homeowner",
+      q11 == "I live with family or friends who own" ~ "Homeowner",
+      TRUE ~ "Non-homeowner"
+    ),
+    
+    # Self-rated health binarization
+    good_health = ifelse(q4g %in% c("Excellent", "Good"), 1, 0),
+    
+    # Convert depression to binary (1 = Yes, 0 = No)
+    depression = ifelse(phq2_ge_3 == "Yes", 1, 0),
+    
+    # Prepare other variables
+    age_cont = as.numeric(age),
+    race_white = ifelse(racem1 == "White", 1, 0),
+    hispanic = ifelse(hisp == "Yes", 1, 0),
+    college_plus = ifelse(educ == "Bachelor's or higher", 1, 0),
+    children = ifelse(q58 %in% c("One", "Two", "Three or more"), 1, 0),
+    homeowner = ifelse(housing_status == "Homeowner", 1, 0),
+    car_access = ifelse(q9 %in% c("Very often", "Fairly often"), 1, 0)
+  ) %>%
+  # Remove rows with missing key variables
+  filter(!is.na(depression), !is.na(canopy_pct_of_land), !is.na(wgt))
+
+# Create survey design object for weighted analysis
+survey_design <- svydesign(ids = ~1, weights = ~wgt, data = processed_data)
+
+# Function to extract model statistics
+extract_model_stats <- function(model, model_name) {
+  # Get coefficients with CI
+  coef_summary <- summary(model)$coefficients
+  confint_results <- confint(model)
+  
+  # Calculate odds ratios
+  odds_ratios <- exp(coef(model))
+  or_ci <- exp(confint_results)
+  
+  # Create results data frame
+  results <- data.frame(
+    Model = model_name,
+    Variable = names(coef(model)),
+    Beta = coef(model),
+    SE = coef_summary[, "Std. Error"],
+    Wald_Chi2 = coef_summary[, "t value"]^2,
+    P_value = coef_summary[, "Pr(>|t|)"],
+    Odds_Ratio = odds_ratios,
+    CI_Lower = or_ci[, 1],
+    CI_Upper = or_ci[, 2],
+    stringsAsFactors = FALSE
+  )
+  
+  # Add model fit statistics
+  results$R2_Nagelkerke <- psrsq(model, method = "Nagelkerke")
+  
+  return(results)
+}
+
+# Function to calculate pseudo R-squared for survey objects
+psrsq <- function(model, method = "Nagelkerke") {
+  # Get null model
+  null_model <- svyglm(depression ~ 1, design = survey_design, family = binomial())
+  
+  # Calculate log-likelihoods (note: these are already -2*LL)
+  ll_null <- as.numeric(logLik(null_model))
+  ll_model <- as.numeric(logLik(model))
+  
+  # Calculate pseudo R-squared
+  n <- nrow(model$data)
+  cox_snell <- 1 - exp(2 * (ll_null - ll_model) / n)
+  
+  if (method == "Nagelkerke") {
+    max_cox_snell <- 1 - exp(2 * ll_null / n)
+    nagelkerke <- cox_snell / max_cox_snell
+    return(nagelkerke)
+  } else {
+    return(cox_snell)
+  }
+}
+
+# Model 1: Tree canopy only
+cat("=== MODEL 1: Tree Canopy Only ===\n")
+model1 <- svyglm(depression ~ canopy_pct_of_land, 
+                 design = survey_design, 
+                 family = binomial())
+summary(model1)
+
+# Model 2: Tree canopy + park access/quality
+cat("\n=== MODEL 2: Tree Canopy + Park Access/Quality ===\n")
+model2 <- svyglm(depression ~ canopy_pct_of_land + park_access + park_quality, 
+                 design = survey_design, 
+                 family = binomial())
+summary(model2)
+
+# Check significance of park variables for Model 3 decision
+park_access_p <- summary(model2)$coefficients["park_access", "Pr(>|t|)"]
+park_quality_p <- summary(model2)$coefficients["park_quality", "Pr(>|t|)"]
+
+cat("Park access p-value:", park_access_p, "\n")
+cat("Park quality p-value:", park_quality_p, "\n")
+
+# Model 3: Add neighborhood characteristics
+cat("\n=== MODEL 3: + Neighborhood Characteristics ===\n")
+# Include park variables based on significance (keeping if p < 0.1)
+if (park_access_p < 0.1 & park_quality_p < 0.1) {
+  model3_formula <- depression ~ canopy_pct_of_land + park_access + park_quality + 
+                   population_density_per_sq_mile + medinc23 + homeval23
+} else if (park_access_p < 0.1) {
+  model3_formula <- depression ~ canopy_pct_of_land + park_access + 
+                   population_density_per_sq_mile + medinc23 + homeval23
+} else if (park_quality_p < 0.1) {
+  model3_formula <- depression ~ canopy_pct_of_land + park_quality + 
+                   population_density_per_sq_mile + medinc23 + homeval23
+} else {
+  model3_formula <- depression ~ canopy_pct_of_land + 
+                   population_density_per_sq_mile + medinc23 + homeval23
+}
+
+model3 <- svyglm(model3_formula, design = survey_design, family = binomial())
+summary(model3)
+
+# Check for multicollinearity between income and home value
+cor_income_home <- cor(processed_data$medinc23, processed_data$homeval23, use = "complete.obs")
+cat("Correlation between income and home value:", cor_income_home, "\n")
+
+# If high correlation (>0.8), create alternative model without home value
+if (abs(cor_income_home) > 0.8) {
+  cat("High correlation detected - creating Model 3B without home value\n")
+  if (park_access_p < 0.1 & park_quality_p < 0.1) {
+    model3b_formula <- depression ~ canopy_pct_of_land + park_access + park_quality + 
+                      population_density_per_sq_mile + medinc23
+  } else if (park_access_p < 0.1) {
+    model3b_formula <- depression ~ canopy_pct_of_land + park_access + 
+                      population_density_per_sq_mile + medinc23
+  } else if (park_quality_p < 0.1) {
+    model3b_formula <- depression ~ canopy_pct_of_land + park_quality + 
+                      population_density_per_sq_mile + medinc23
+  } else {
+    model3b_formula <- depression ~ canopy_pct_of_land + 
+                      population_density_per_sq_mile + medinc23
+  }
+  
+  model3b <- svyglm(model3b_formula, design = survey_design, family = binomial())
+  summary(model3b)
+  
+  # Use the better fitting model
+  model3_final <- model3b
+} else {
+  model3_final <- model3
+}
+
+# Model 4: Add individual characteristics
+cat("\n=== MODEL 4: + Individual Characteristics ===\n")
+# Build formula based on Model 3 results
+model3_vars <- all.vars(formula(model3_final))[-1]  # Remove depression
+model4_formula <- as.formula(paste("depression ~", paste(model3_vars, collapse = " + "), 
+                                  "+ age_cont + race_white + hispanic + college_plus + children + homeowner + car_access"))
+
+model4 <- svyglm(model4_formula, design = survey_design, family = binomial())
+summary(model4)
+
+# Model 5: Backward elimination
+cat("\n=== MODEL 5: Backward Elimination ===\n")
+# Start with full model and do backward elimination, but keep tree canopy
+# Create a version where we can't eliminate canopy_pct_of_land
+model5_formula <- formula(model4)
+model5_terms <- terms(model5_formula)
+
+# Force tree canopy to stay by using a custom step function or manual elimination
+# Alternative approach: use stepAIC but protect tree canopy
+library(MASS)
+
+# Create scope that excludes canopy_pct_of_land from being dropped
+all_vars <- all.vars(formula(model4))[-1]  # Remove depression
+keep_vars <- "canopy_pct_of_land"
+can_drop <- setdiff(all_vars, keep_vars)
+
+# Create lower scope that always includes tree canopy
+lower_formula <- as.formula(paste("depression ~", paste(keep_vars, collapse = " + ")))
+
+model5 <- stepAIC(model4, direction = "backward", 
+                  scope = list(lower = lower_formula), 
+                  trace = FALSE)
+summary(model5)
+
+# Extract and display results for all models
+cat("\n=== MODEL COMPARISON TABLE ===\n")
+
+models <- list(
+  "Model 1" = model1,
+  "Model 2" = model2,
+  "Model 3" = model3_final,
+  "Model 4" = model4,
+  "Model 5" = model5
+)
+
+# Create comparison table
+all_results <- data.frame()
+for (i in seq_along(models)) {
+  model_results <- extract_model_stats(models[[i]], names(models)[i])
+  all_results <- rbind(all_results, model_results)
+}
+
+# Display results
+print(all_results)
+
+# Model fit statistics
+cat("\n=== MODEL FIT STATISTICS ===\n")
+for (i in seq_along(models)) {
+  cat(names(models)[i], ":\n")
+  cat("  AIC:", AIC(models[[i]]), "\n")
+  
+  # Alternative R-squared calculation using deviance
+  null_dev <- models[[i]]$null.deviance
+  resid_dev <- models[[i]]$deviance
+  mcfadden_r2 <- 1 - (resid_dev / null_dev)
+  cat("  McFadden R²:", mcfadden_r2, "\n")
+  
+  # Try Nagelkerke if positive
+  nagelkerke_r2 <- psrsq(models[[i]], "Nagelkerke")
+  if (nagelkerke_r2 >= 0) {
+    cat("  Nagelkerke R²:", nagelkerke_r2, "\n")
+  } else {
+    cat("  Nagelkerke R²: [calculation issue - using McFadden instead]\n")
+  }
+  
+  cat("  Deviance:", deviance(models[[i]]), "\n")
+  cat("  Null Deviance:", models[[i]]$null.deviance, "\n")
+  cat("  Residual df:", df.residual(models[[i]]), "\n")
+  cat("  Deviance/df ratio:", deviance(models[[i]]) / df.residual(models[[i]]), "\n\n")
+}
+```
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(survey)
+library(MASS)
+
+# Read and process the data
+data <- read_csv("corrected_filtered_nature_health_data.csv")
+
+processed_data <- data %>%
+  mutate(
+    depression = ifelse(phq2_ge_3 == "Yes", 1, 0),
+    park_access = ifelse(q23a == "Yes", 1, 0),
+    park_quality = ifelse(q23c == "Yes", 1, 0),
+    age_cont = as.numeric(age),
+    race_white = ifelse(racem1 == "White", 1, 0),
+    hispanic = ifelse(hisp == "Yes", 1, 0),
+    college_plus = ifelse(educ == "Bachelor's or higher", 1, 0),
+    children = ifelse(q58 %in% c("One", "Two", "Three or more"), 1, 0),
+    homeowner = ifelse(q11 %in% c("I own my home", "I live with family or friends who own"), 1, 0),
+    car_access = ifelse(q9 %in% c("Very often", "Fairly often"), 1, 0)
+  ) %>%
+  filter(!is.na(depression), !is.na(canopy_pct_of_land), !is.na(wgt))
+
+# Create survey design
+datadesign <- svydesign(ids = ~1, weights = ~wgt, data = processed_data)
+
+# MODEL 1: Tree canopy only
+cat("=== MODEL 1: Tree Canopy Only ===\n")
+model1 <- svyglm(depression ~ canopy_pct_of_land, design = datadesign, family = "binomial")
+summary(model1)
+exp(coef(model1))  # OR
+exp(confint(model1))  # CI
+
+# MODEL 2: Tree canopy + park access/quality
+cat("\n=== MODEL 2: Tree Canopy + Parks ===\n")
+model2 <- svyglm(depression ~ canopy_pct_of_land + park_access + park_quality, 
+                 design = datadesign, family = "binomial")
+summary(model2)
+exp(coef(model2))  # OR
+exp(confint(model2))  # CI
+
+# MODEL 3: + Neighborhood characteristics
+cat("\n=== MODEL 3: + Neighborhood Characteristics ===\n")
+model3 <- svyglm(depression ~ canopy_pct_of_land + park_access + park_quality + 
+                 population_density_per_sq_mile + medinc23 + homeval23, 
+                 design = datadesign, family = "binomial")
+summary(model3)
+exp(coef(model3))  # OR
+exp(confint(model3))  # CI
+
+# MODEL 4: + Individual characteristics
+cat("\n=== MODEL 4: + Individual Characteristics ===\n")
+model4 <- svyglm(depression ~ canopy_pct_of_land + park_access + park_quality + 
+                 population_density_per_sq_mile + medinc23 + homeval23 +
+                 age_cont + race_white + hispanic + college_plus + children + homeowner + car_access,
+                 design = datadesign, family = "binomial")
+summary(model4)
+exp(coef(model4))  # OR
+exp(confint(model4))  # CI
+
+# MODEL 5: Backward elimination (keeping tree canopy)
+cat("\n=== MODEL 5: Backward Elimination ===\n")
+lower_model <- svyglm(depression ~ canopy_pct_of_land, design = datadesign, family = "binomial")
+model5 <- stepAIC(model4, direction = "backward", scope = list(lower = formula(lower_model)), trace = FALSE)
+summary(model5)
+exp(coef(model5))  # OR
+exp(confint(model5))  # CI
+
+# Model fit statistics
+cat("\n=== MODEL FIT COMPARISON ===\n")
+models <- list(model1, model2, model3, model4, model5)
+model_names <- c("Model 1", "Model 2", "Model 3", "Model 4", "Model 5")
+
+for(i in 1:5) {
+  cat(model_names[i], ":\n")
+  cat("  AIC:", AIC(models[[i]]), "\n")
+  cat("  McFadden R²:", 1 - (deviance(models[[i]]) / models[[i]]$null.deviance), "\n")
+  cat("  Deviance:", deviance(models[[i]]), "\n\n")
+}
+```
+
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(survey)
+library(MASS)
+
+# Read and process the data
+data <- read_csv("corrected_filtered_nature_health_data.csv")
+
+processed_data <- data %>%
+  mutate(
+    # Outcome variable - Depression (PHQ-2 >= 3)
+    depression = ifelse(phq2_ge_3 == "Yes", 1, 0),
+   
+     # Create canopy deciles
+    canopy_decile = ntile(canopy_pct_of_land, 10),
+    canopy_cat = case_when(
+      canopy_decile == 1 ~ "D1_Lowest",
+      canopy_decile == 2 ~ "D2_Low", 
+      canopy_decile == 3 ~ "D3_Low_Med",
+      canopy_decile == 4 ~ "D4_Med_Low",
+      canopy_decile == 5 ~ "D5_Med",
+      canopy_decile == 6 ~ "D6_Med",
+      canopy_decile == 7 ~ "D7_Med_High",
+      canopy_decile == 8 ~ "D8_High",
+      canopy_decile == 9 ~ "D9_High",
+      canopy_decile == 10 ~ "D10_Highest"
+    ),
+    canopy_cat = factor(canopy_cat, levels = c("D5_Med", "D1_Lowest", "D2_Low", "D3_Low_Med", "D4_Med_Low", 
+                                              "D6_Med", "D7_Med_High", "D8_High", "D9_High", "D10_Highest")),
+    
+    # Nature variables (Model 1)
+    park_access = ifelse(q17e %in% c("Strongly agree", "Somewhat agree"), 1, 0),
+    park_quality = ifelse(q4g %in% c("Excellent", "Good"), 1, 0),
+    # canopy_pct_of_land stays continuous
+    
+    # Neighborhood variables (Model 2) - restructured as quintiles (1-5)
+    pop_density_quintile = ntile(population_density_per_sq_mile, 5),
+    medinc_quintile = ntile(medinc23, 5),
+    homeval_quintile = ntile(homeval23, 5),
+    
+    # Individual characteristics (Model 3)
+    age_cont = as.numeric(age),
+    race_white = ifelse(racem1 == "White", 1, 0),
+    hispanic = ifelse(hisp == "Yes", 1, 0),
+    college_plus = ifelse(educ == "Bachelor's or higher", 1, 0),
+    children = ifelse(q58 %in% c("One", "Two", "Three or more"), 1, 0),
+    homeowner = ifelse(q11 %in% c("I own my home", "I live with family or friends who own"), 1, 0)
+    
+    # Note: car_access variable removed as requested
+  ) %>%
+  filter(!is.na(depression), !is.na(canopy_pct_of_land), !is.na(wgt))
+
+# Create survey design
+datadesign <- svydesign(ids = ~1, weights = ~wgt, data = processed_data)
+
+# Check sample sizes after processing
+cat("=== SAMPLE SIZE AFTER PROCESSING ===\n")
+cat("Total observations:", nrow(processed_data), "\n")
+cat("Depression outcome distribution:\n")
+table(processed_data$depression)
+
+# MODEL 1: Nature variables only (canopy, park access, park quality)
+cat("\n=== MODEL 1: Nature Variables Only ===\n")
+model1 <- svyglm(depression ~ canopy_decile + park_access + park_quality, 
+                 design = datadesign, family = "binomial")
+summary(model1)
+cat("\nOdds Ratios:\n")
+exp(coef(model1))
+cat("\n95% Confidence Intervals:\n")
+exp(confint(model1))
+
+# MODEL 2: Neighborhood variables only (quintiles)
+cat("\n=== MODEL 2: Neighborhood Variables Only ===\n")
+model2 <- svyglm(depression ~ pop_density_quintile + medinc_quintile + homeval_quintile, 
+                 design = datadesign, family = "binomial")
+summary(model2)
+cat("\nOdds Ratios:\n")
+exp(coef(model2))
+cat("\n95% Confidence Intervals:\n")
+exp(confint(model2))
+
+# MODEL 3: Individual characteristics only
+cat("\n=== MODEL 3: Individual Characteristics Only ===\n")
+model3 <- svyglm(depression ~ age_cont + race_white + hispanic + college_plus + children + homeowner,
+                 design = datadesign, family = "binomial")
+summary(model3)
+cat("\nOdds Ratios:\n")
+exp(coef(model3))
+cat("\n95% Confidence Intervals:\n")
+exp(confint(model3))
+
+# Identify significant variables from Models 1-3 (p < 0.05)
+cat("\n=== SIGNIFICANT VARIABLES IDENTIFICATION ===\n")
+
+# Get p-values from each model
+model1_pvals <- summary(model1)$coefficients[, "Pr(>|t|)"]
+model2_pvals <- summary(model2)$coefficients[, "Pr(>|t|)"]
+model3_pvals <- summary(model3)$coefficients[, "Pr(>|t|)"]
+
+cat("Model 1 p-values:\n")
+print(model1_pvals)
+cat("\nModel 2 p-values:\n")
+print(model2_pvals)
+cat("\nModel 3 p-values:\n")
+print(model3_pvals)
+
+# Extract significant predictors (p < 0.05, excluding intercept)
+sig_model1 <- names(model1_pvals)[model1_pvals < 0.05 & names(model1_pvals) != "(Intercept)"]
+sig_model2 <- names(model2_pvals)[model2_pvals < 0.05 & names(model2_pvals) != "(Intercept)"]
+sig_model3 <- names(model3_pvals)[model3_pvals < 0.05 & names(model3_pvals) != "(Intercept)"]
+
+cat("\nSignificant variables from Model 1:", paste(sig_model1, collapse = ", "), "\n")
+cat("Significant variables from Model 2:", paste(sig_model2, collapse = ", "), "\n") 
+cat("Significant variables from Model 3:", paste(sig_model3, collapse = ", "), "\n")
+
+# MODEL 4: All significant variables from Models 1-3
+cat("\n=== MODEL 4: All Significant Variables ===\n")
+
+# Build Model 4 manually based on significant variables
+# Start with a comprehensive model including all potentially significant variables
+model4 <- svyglm(depression ~ canopy_cat + park_access + park_quality + 
+                 pop_density_quintile + medinc_quintile + homeval_quintile +
+                 age_cont + race_white + hispanic + college_plus + children + homeowner,
+                 design = datadesign, family = "binomial")
+
+summary(model4)
+cat("\nOdds Ratios:\n")
+exp(coef(model4))
+cat("\n95% Confidence Intervals:\n")
+exp(confint(model4))
+
+# MODEL 5: Backward elimination from Model 4
+cat("\n=== MODEL 5: Backward Elimination ===\n")
+model4_pvals <- summary(model4)$coefficients[, "Pr(>|t|)"]
+cat("Model 4 p-values for final selection:\n")
+print(model4_pvals)
+
+# Manually select significant variables for final model based on p < 0.05
+# This will need to be adjusted based on actual results
+cat("\nBuilding final model with significant variables (p < 0.05)...\n")
+
+# Note: You'll need to manually adjust Model 5 based on the significant variables from Model 4
+# The following is a template - replace with actual significant variables
+cat("Note: Adjust the following model based on significant variables from Model 4 output above\n")
+cat("Template Model 5 (replace with actual significant predictors):\n")
+
+# Example final model - adjust based on your Model 4 results
+# model5 <- svyglm(depression ~ canopy_pct_of_land + medinc_quintile + 
+#                  age_cont + college_plus + homeowner, 
+#                  design = datadesign, family = "binomial")
+
+# For now, create a basic final model to avoid errors
+model5 <- svyglm(depression ~ canopy_cat  + age_cont + homeval_quintile + college_plus + homeowner,
+                 design = datadesign, family = "binomial")
+                 
+summary(model5)
+cat("\nFinal Model Odds Ratios:\n")
+exp(coef(model5))
+cat("\nFinal Model 95% Confidence Intervals:\n")
+exp(confint(model5))
+
+# MODEL FIT COMPARISON
+cat("\n=== MODEL FIT COMPARISON ===\n")
+models <- list(model1, model2, model3, model4, model5)
+model_names <- c("Model 1: Nature", "Model 2: Neighborhood", "Model 3: Individual", 
+                 "Model 4: All Significant", "Model 5: Final")
+
+for(i in 1:5) {
+  cat(model_names[i], ":\n")
+  cat("  AIC:", AIC(models[[i]]), "\n")
+  cat("  McFadden R²:", 1 - (deviance(models[[i]]) / models[[i]]$null.deviance), "\n")
+  cat("  Deviance:", deviance(models[[i]]), "\n\n")
+}
+```
+

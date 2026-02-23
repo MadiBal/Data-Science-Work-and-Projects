@@ -1,0 +1,364 @@
+---
+title: "Final Group Project_Baltagulov_Lydell_Stutzman"
+output: html_document
+date: "12/17/2025"
+---
+
+Setup and Ground work
+
+```{r setup, include=FALSE}
+## Install and load packages 
+if (!require(tidyverse)) install.packages('tidyverse')
+if (!require(survival)) install.packages('survival')
+if (!require(MatchIt)) install.packages('MatchIt')
+if (!require(segmented)) install.packages('segmented')
+
+library(tidyverse)
+library(survival)
+library(MatchIt)
+library(ggplot2)
+library("psych")
+library("meta")
+library("MatchIt")
+library(segmented)
+
+##Load in datasets
+setwd("/Users/lisastutzman/Library/Mobile Documents/com~apple~CloudDocs/YALE!/CDE 566/Final Project")
+data = read.csv("largetowns_nature_health_data.csv")
+
+```
+
+Visualizing the data as it stands
+```{r}
+#Plot for mental health outcome vs tree coverage
+ggplot(data, aes(x = canopy_pct_of_land, y = phq2_ge_3)) +
+  geom_jitter(height = 0.05, alpha = 0.3) +
+  labs(
+    title = "Association Between Tree Canopy Coverage and Depression Risk (PHQ-2 ≥ 3)",
+    x = "Tree Canopy (% of Land)",
+    y = "Depression Indicator"
+  ) +
+  theme_minimal() +
+
+  geom_vline(aes(xintercept = 0.3, color = "3-30-300 Canopy Cutoff (30%)"), linetype = "dashed", size = 1) +
+  geom_vline(aes(xintercept = 0.783, color = "Estimated Threshold (77.8%)"), linetype = "dashed", size = 1) +
+  scale_color_manual(
+    name = "Thresholds",
+    values = c("3-30-300 Canopy Cutoff (30%)" = "maroon",
+               "Estimated Threshold (77.8%)" = "forestgreen")
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.direction = "horizontal"
+  )
+
+```
+
+Binarizing Tree Canapoy Coverage - 30%
+```{r}
+
+#summarizing tree canopy coverage
+summary(data$canopy_pct_of_land)
+
+#How many data entries have a coverage <30
+sum(data$canopy_pct_of_land < 0.3, na.rm = TRUE)
+
+
+#What proportion data entries have a coverage <30
+sum(data$canopy_pct_of_land < 0.3, na.rm = TRUE)/
+sum(!is.na(data$canopy_pct_of_land)) * 100
+#11.41%
+
+#Create a new binary variable
+data$canopy_binary = ifelse(data$canopy_pct_of_land <= 0.3, 1, 0)
+summary(data$canopy_binary)
+
+
+#Transform phq2_ge_3 from yes,no into 1,0
+data$phq2_ge_3_binary <- ifelse(data$phq2_ge_3 == "Yes", 1, 0)
+summary(data$phq2_ge_3_binary)
+```
+
+
+Binarizing Tree Canapoy Coverage - threshold
+```{r}
+
+fit_lin <- glm(phq2_ge_3_binary ~ canopy_pct_of_land,
+  data = data,family = binomial())
+
+fit_seg <- segmented(fit_lin, seg.Z = ~ canopy_pct_of_land, psi = 0.3) #psi means using 30% as our starting guess
+
+summary(fit_seg)
+
+# Estimated Break-Point(s):
+#                           Est. St.Err
+# psi1.canopy_pct_of_land 0.778  0.018
+
+#How many data entries have a coverage <78.3
+sum(data$canopy_pct_of_land < 0.778, na.rm = TRUE)
+
+
+#What proportion data entries have a coverage <78.3
+sum(data$canopy_pct_of_land < 0.778, na.rm = TRUE) /
+sum(!is.na(data$canopy_pct_of_land)) * 100
+#90.75
+
+#Create a new binary variable
+data$canopy_threshold = ifelse(data$canopy_pct_of_land <= 0.783, 1, 0)
+summary(data$threshold)
+
+```
+
+
+
+Crude association - 30%
+```{r}
+##Estimate the crude and the adjusted odds ratio (OR) and 95% Confidence Interval (CI) 
+##for the total effect of E on Y using standard outcome regression analysis. 
+
+# Crude association
+
+  # Crude: Crude Odds Ratio (OR) and 95% Confidence Interval (CI) for the total effect of E on Y using standard outcome regression analysis
+  fit <- glm(phq2_ge_3_binary ~ canopy_binary, data=data, family=binomial()) #binomial b/c y is a binomial outcome
+  summary(fit)
+  #mean difference and 95% CI
+    #EXPONENTIATE b/c binomial has a logit link
+  cbind(beta = exp(coef(fit)), exp(confint(fit)))
+  
+  # Parameter estimates for e:
+  # Crude: OR= 1.7987757, 95% CI: 1.4789287, 2.1781435
+  # Living in a low tree canopy area (≤30%) is associated with ~80% higher odds of reporting depressive symptoms, unadjusted.
+
+
+# Adjusted association
+  
+  # Adjusted: Adjusted Odds Ratio (OR) and 95% Confidence Interval (CI) for the total effect of E on Y using standard outcome regression analysis
+  # THIS IS BASED ON THE DAG FROM Q1
+  # minimal sufficient set: {homeval23, population_density_per_sq_mile, medinc23, age, racem1, hisp, educ, q11}
+  fitc <- glm(phq2_ge_3_binary ~ canopy_binary + homeval23 + population_density_per_sq_mile + medinc23 + age + racem1 + hisp + educ + q11, data=data, family=binomial()) #binomial b/c y is a binomial outcome
+
+  summary(fitc)
+  #EXPONENTIATE b/c binomial has a logit link
+  cbind(beta = exp(coef(fitc)), exp(confint(fitc)))
+  
+  # Parameter estimates for e:
+  # Adjusted: OR=  1.0993518, 95% CI: 0.83008212, 1.4566438
+  # Living in a low tree canopy area (≤30%) is associated with a ((non-significant)) ~10% higher odds of reporting depressive symptoms, after adjusting for our desired covariates.
+
+```
+
+Crude association - threshold
+```{r}
+##Estimate the crude and the adjusted odds ratio (OR) and 95% Confidence Interval (CI) 
+##for the total effect of E on Y using standard outcome regression analysis. 
+
+# Crude association
+
+  # Crude: Crude Odds Ratio (OR) and 95% Confidence Interval (CI) for the total effect of E on Y using standard outcome regression analysis
+  fit <- glm(phq2_ge_3_binary ~ canopy_threshold, data=data, family=binomial()) #binomial b/c y is a binomial outcome
+  summary(fit)
+  #mean difference and 95% CI
+    #EXPONENTIATE b/c binomial has a logit link
+  cbind(beta = exp(coef(fit)), exp(confint(fit)))
+  
+  # Parameter estimates for e:
+  # Crude: OR= 1.0742649 , 95% CI: 0.8258507, 1.4178593
+  # Living in a low tree canopy area (≤77.8%) is associated with a (non-significant) ~7% higher odds of reporting depressive symptoms, unadjusted.
+
+
+# Adjusted association
+  
+  # Adjusted: Adjusted Odds Ratio (OR) and 95% Confidence Interval (CI) for the total effect of E on Y using standard outcome regression analysis
+  # THIS IS BASED ON THE DAG FROM Q1
+  # minimal sufficient set: {homeval23, population_density_per_sq_mile, medinc23, age, racem1, hisp, educ, q11}
+  fitc <- glm(phq2_ge_3_binary ~ canopy_threshold + homeval23 + population_density_per_sq_mile + medinc23 + age + racem1 + hisp + educ + q11, data=data, family=binomial()) #binomial b/c y is a binomial outcome
+
+  summary(fitc)
+  #EXPONENTIATE b/c binomial has a logit link
+  cbind(beta = exp(coef(fitc)), exp(confint(fitc)))
+  
+  # Parameter estimates for e:
+  # Adjusted: OR=  0.7211483, 95% CI: 0.53839445, 0.9771179
+  # Living in a low tree canopy area (≤77.8%) is associated with a ~28% lower odds of reporting depressive symptoms, after adjusting for our desired covariates.
+
+```
+
+
+
+##PS Analyses - 30%
+```{r}
+##Construct the propensity score (PS) for exposure (E=1) according to confounding factors based on your answer from Q1
+
+  #model PS = Pr(E =1 | covs)
+  
+  #LS: note that this step is purely prediction and more advance ML algorymns that can help you predict may improve your control of confounders
+  fitps <- glm(canopy_binary ~ homeval23 + population_density_per_sq_mile + medinc23 + age + racem1 + hisp + educ + q11, data=data, family=binomial()) #logistic regression
+  
+  #LS: Note logisitc regression bounds your predictive value between 0 and 1, which is a good analog to probability
+  
+  summary(fitps)
+  data$ps <- predict(fitps, type = "response", newdata = data) #type = "response" gives the predicted probabilities
+  summary(data$ps[data$e==0])
+  summary(data$ps[data$e==1])
+
+
+
+
+##Show the distributions of your PS in the exposed and the unexposed groups using histogram
+  
+  ## Plot the estimated propensity score
+  ggplot(data, aes(x = ps, fill = factor(canopy_binary))) + geom_density(alpha = 0.2) +
+    xlab('Probability of Exposure E') +
+    ggtitle('Propensity Score Distribution by Exposure Canopy Binary') +
+    scale_fill_discrete('') +
+    theme(legend.position = 'right', legend.direction = 'vertical')
+  # The probability for the e=1 group given covariates is higher than the e=0 group.
+  #LS: Note that this is because the distribution of PSs is different between those in e=1 and e=0
+  # aka the distribution of confounders in different between the groups
+  
+  # alternative plot with histograms
+  data <- data %>% mutate(elabel = ifelse(canopy_binary == 1,
+                                               yes = 'canopy_binary=1',
+                                               no = 'canopy_binary=0'))
+  ggplot(data, aes(x = ps, fill = as.factor(elabel), color = as.factor(elabel))) +
+    geom_histogram(alpha = 0.3, position = 'identity', bins=15) +
+    facet_grid(as.factor(canopy_binary) ~ .) +
+    xlab('Probability of Exposure canopy_binary') +
+    ggtitle('Propensity Score Distribution by Exposure canopy_binary') +
+    scale_fill_discrete('') +
+    scale_color_discrete('') +
+    theme(legend.position = 'bottom', legend.direction = 'vertical')
+  
+  
+
+##Estimate the adjusted odds ratio (OR) and 95% Confidence Interval (CI) 
+##for the total effect of E on Y using outcome regression analysis 
+##that included the PS as a covariate (continuous, linear term). 
+  fitpsco <- glm(phq2_ge_3_binary ~ canopy_binary + ps, data=data, family=binomial())
+  
+  summary(fitpsco)
+  #EXPONENTIATE b/c binomial has a logit link
+  exp(cbind(OR = coef(fitpsco), confint(fitpsco)))
+  
+  # Parameter estimates for e:
+  # Adjusted: ????
+  
+  
+
+##Match the unexposed to the exposed by the PS score, with the nearest-neighbor matching of a 1:1 ratio and a caliper of 0.4 standard deviations. 
+
+  # Estimating ATT  
+  #LS: average treatment effect - thus it is more reflective of the treated population
+  #match the qsmk=0 to qsmk=1 using nearest neighbor 1:1 greedy matching using logistic regression and caliper = .40 sd(ps)
+  #LS: in smaller datasets you may need to have replacement 
+  
+#to subvert these errors
+data_cc <- data %>%
+  dplyr::select(all_of(c("canopy_binary","homeval23","population_density_per_sq_mile","medinc23","age","racem1","hisp","educ","q11","phq2_ge_3_binary"))) %>%
+  drop_na()
+
+set.seed(123) 
+  m.out <- matchit(canopy_binary ~ homeval23 + population_density_per_sq_mile + medinc23 + age + racem1 + hisp + educ + q11, data=data_cc,method= "nearest", ratio=1, 
+                   distance= "logit", caliper= NULL, std.caliper = TRUE, replace= F)
+  
+  summary(m.out) # check balance for each iteration above to determine which approach gives the most balance
+  
+  summary(m.out, standardize = TRUE) 
+  #Criterion for standardized differences: <0.25 (SAS threshold), <0.1
+  #Criterion for Variance Ratios: should be close to 1; Ratios of 0.80 to 1.25 are desirable
+  
+  #Nearest-neighbor propensity score matching was attempted; however, the propensity score model exhibited near-complete separation and no units could be matched, indicating a lack of common support between exposure groups. This reflects a violation of the positivity assumption. Therefore, matching was not pursued further.
+  
+  g.matches <- get_matches(m.out, data = data_cc,
+                           distance = "prop.score")
+  
+  dim(g.matches) #multiple rows per matched unit
+  head(g.matches)
+  
+  #check the distribution of PS by exposure in the matched data
+  summary(g.matches$ps[g.matches$canopy_binary==0])
+  summary(g.matches$ps[g.matches$canopy_binary==1])
+  
+  
+
+  #Plot the estimated propensity score
+  ggplot(g.matches, aes(x = prop.score, fill = factor(canopy_binary))) + geom_density(alpha = 0.2) +
+    xlab('Probability of Exposure canopy_binary') +
+    ggtitle('Propensity Score Distribution by Exposure canopy_binary - post match') +
+    scale_fill_discrete('') +
+    theme(legend.position = 'bottom', legend.direction = 'vertical')
+  
+  #alternative plot with histograms
+  ggplot(g.matches, aes(x = prop.score, fill = as.factor(canopy_binary), color = as.factor(canopy_binary))) +
+    geom_histogram(alpha = 0.3, position = 'identity', bins=15) +
+    facet_grid(as.factor(canopy_binary) ~ .) +
+    xlab('Probability of Exposure canopy_binary') +
+    ggtitle('Propensity Score Distribution by Exposure canopy_binary - post match') +
+    scale_fill_discrete('') +
+    scale_color_discrete('') +
+    theme(legend.position = 'bottom', legend.direction = 'vertical')
+  
+
+##Estimate the Odds Ratio (OR) and 95% Confidence Interval (CI) 
+##for the total effect of E on Y using the PS-match data and accounting for the matching sets.  
+  
+  #If outcome is binary, you can use a conditional logistic regression 
+  library(survival)
+  fit_clogit <- clogit(phq2_ge_3_binary ~ canopy_binary + strata(subclass), data = g.matches)
+  summary(fit_clogit)
+
+  #EXPONENTIATE b/c binomial has a logit link
+  exp(cbind(coef(fit_clogit),confint(fit_clogit)))
+  
+  #OR= 1.234694, 95% CI: 0.9459797 1.611524
+
+##OPTIONAL**
+##If you would like to further practice your skills, you may conduct a PS-stratified analysis based on the PS deciles. 
+
+##First, estimate and report the Odds Ratio (OR) and 95% Confidence Interval (CI) for the total effect of E on Y in each PS-decile. 
+
+  # Calculation of deciles (a 10-category variable by ps distribution)
+  #Had to include a different approach than lab to work around nto having unique cut points
+  data$ps.dec <-ntile(data$ps, 10)
+  
+  describeBy(data$ps, list(ps.dec=data$ps.dec, y=data$canopy_binary))
+  
+  # Run regression in each PS decile
+  # Adjust for deciles of PS, NOT allowing for interaction
+  
+  #function to create deciles 
+  #  decile <- function(x) {
+  #    return(factor(quantcut(x, seq(0, 1, 0.1), labels = FALSE)))
+  #  }
+  
+  data_eff<-as.data.frame(matrix(nrow=10,ncol=4))
+  for (deciles in c(1:10)) {
+    fit<-glm(data=data[which(data$ps.dec==deciles),],phq2_ge_3_binary ~ canopy_binary)
+    data_eff[deciles,1]<-exp(coef(fit)[2])                    #Estimate   #EXPONENTIATE b/c binomial has a logit link
+    data_eff[deciles,2]<-summary(fit)$coefficients[, 2][2]    #SE
+    data_eff[deciles,3:4] <-exp(confint(fit))                 #95% CI   #EXPONENTIATE b/c binomial has a logit link
+    
+  }
+  
+  data_eff[,5]<-1:10
+  colnames(data_eff)<-c("Estimate","SE","CI_upper", "CI_lower","pc.desc")
+  data_eff
+
+
+##Then, use meta-analysis approach to summarize or combine the effect estimates across PS-decile. 
+  # https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/fixed.html
+  m <- metagen(Estimate,
+               SE,
+               data=data_eff,
+               studlab=paste(pc.desc),
+               comb.fixed = TRUE,
+               comb.random = FALSE,
+               prediction=TRUE,
+               sm="SMD")
+  
+  print(m)
+  m[["seTE.fixed"]] #for checking standard errors
+  
+  #OR:1.0651 [0.9703; 1.1599]
+```
